@@ -16,15 +16,15 @@ func NewMemoryChaosStore() *MemoryChaosStore {
 	}
 }
 
-func (s *MemoryChaosStore) Get() (*core.ChaosState, error) {
+func (s *MemoryChaosStore) Get() (core.ChaosState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return &s.state, nil
+	return s.state, nil
 }
 
-func (s *MemoryChaosStore) Set(state *core.ChaosState) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	s.state = *state
+func (s *MemoryChaosStore) Set(state core.ChaosState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state = state
 	return nil
 }

@@ -56,7 +56,7 @@ type WelcomeResponse struct {
 
 type HealthResponse struct {
 	Status string  `json:"status"`
-	Uptime float64 `json:"uptime"`
+	Uptime float64 `json:"uptime_seconds"`
 }
 
 type ChaosResponse struct {

@@ -135,6 +135,6 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/chaos", h.chaos)
 }
 
-func NewHandler(svc *core.ServicePort) *Handler {
-	return &Handler{svc: *svc}
+func NewHandler(svc core.ServicePort) *Handler {
+	return &Handler{svc: svc}
 }
