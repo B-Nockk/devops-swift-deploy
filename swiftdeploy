@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""
+swiftdeploy — The CLI that builds and manages the SwiftDeploy stack.
+
+Usage:
+  swiftdeploy init     [--<section>.<field>=<value> ...]
+  swiftdeploy validate [--<section>.<field>=<value> ...]
+  swiftdeploy deploy   [--<section>.<field>=<value> ...]
+  swiftdeploy promote  <canary|stable>
+  swiftdeploy teardown [--clean]
+
+Flag overrides (apply to init, validate, deploy):
+  Any manifest field can be overridden for the session without mutating manifest.yaml.
+  Flags use dotted notation matching the manifest structure:
+
+    --nginx.port=9090
+    --nginx.contact=ops@mycompany.com
+    --nginx.proxy_timeout=60
+    --nginx.image=nginx:1.25
+    --services.port=4000
+    --services.image=my-app:v2
+    --services.version=2.1.0
+    --network.name=my-network
+    --network.driver_type=bridge
+    --mode=canary
+
+  Flags are session-only — they affect generated configs but do NOT write back
+  to manifest.yaml. Only `swiftdeploy promote` mutates the manifest (mode only).
+
+Examples:
+  swiftdeploy init
+  swiftdeploy init --nginx.port=9090 --nginx.contact=team@corp.com
+  swiftdeploy validate
+  swiftdeploy deploy --nginx.proxy_timeout=60
+  swiftdeploy promote canary
+  swiftdeploy promote stable
+  swiftdeploy teardown
+  swiftdeploy teardown --clean
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from cli.commands import deploy, promote, teardown, validate
+from cli.config import parse_flag_overrides, resolve
+from cli.generator import generate_all
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+#! should be in env
+MANIFEST_PATH = PROJECT_ROOT / "manifest.yaml"
+TEMPLATES_DIR = PROJECT_ROOT / "templates"
+OUTPUT_DIR = PROJECT_ROOT
+
+# ===========================================================================
+# helpers
+# ===========================================================================
+
+
+def _print_config_summary(config, flag_args):
+    overrides = parse_flag_overrides(flag_args)
+
+    def mark(section, field, value):
+        sec = overrides.get(section, {})
+        suffix = "  ← flag override" if isinstance(sec, dict) and field in sec else ""
+        return f"  {field:20s} {value}{suffix}"
+
+    def mark_top(field, value):
+        return f"  {field:20s} {value}" + (
+            "  ← flag override" if field in overrides else ""
+        )
+
+    print("\n  Resolved configuration:")
+    print("  services:")
+    print(mark("services", "image", config.service_image))
+    print(mark("services", "port", config.service_port))
+    print(mark("services", "version", config.service_version))
+    print(mark("services", "restart", config.restart_policy))
+    print("  nginx:")
+    print(mark("nginx", "image", config.nginx_image))
+    print(mark("nginx", "port", config.nginx_port))
+    print(mark("nginx", "proxy_timeout", f"{config.proxy_timeout}s"))
+    print(mark("nginx", "contact", config.contact))
+    print("  network:")
+    print(mark("network", "name", config.network_name))
+    print(mark("network", "driver_type", config.network_driver))
+    print(mark_top("mode", config.mode))
+
+
+# ===========================================================================
+# Behaviour
+# ===========================================================================
+def cmd_init(args: list[str]) -> int:
+    print("→ Resolving configuration...")
+    config = resolve(MANIFEST_PATH, args)
+
+    _print_config_summary(config, args)
+    print("\n→ Rendering templates...")
+
+    nginx_path, compose_path = generate_all(
+        config,
+        TEMPLATES_DIR,
+        OUTPUT_DIR,
+    )
+
+    print(f"  [OK] {nginx_path.relative_to(PROJECT_ROOT)}")
+    print(f"  [OK] {compose_path.relative_to(PROJECT_ROOT)}")
+    print("\n✓ init complete — configs generated from manifest.")
+
+    if any(a.startswith("--") and "=" in a for a in args):
+        print(
+            "\n  Note: Flag overrides are session-only.\n"
+            "  manifest.yaml was NOT modified.\n"
+            "  To change deployment mode, use: swiftdeploy promote [canary|stable]"
+        )
+    return 0
+
+
+def cmd_validate(args: list[str]) -> int:
+    return validate(
+        MANIFEST_PATH,
+        OUTPUT_DIR,
+        args,
+    )
+
+
+def cmd_deploy(args: list[str]) -> int:
+    return deploy(
+        MANIFEST_PATH,
+        TEMPLATES_DIR,
+        OUTPUT_DIR,
+        args,
+    )
+
+
+def cmd_promote(args: list[str]) -> int:
+    if not args or args[0] not in ("canary", "stable"):
+        print("Usage: swiftdeploy promote <canary|stable>", file=sys.stderr)
+        return 1
+
+    return promote(
+        MANIFEST_PATH,
+        TEMPLATES_DIR,
+        OUTPUT_DIR,
+        args[0],
+    )
+
+
+def cmd_teardown(args: list[str]) -> int:
+    return teardown(
+        MANIFEST_PATH,
+        OUTPUT_DIR,
+        "--clean" in args,
+    )
+
+
+COMMANDS = {
+    "init": cmd_init,
+    "validate": cmd_validate,
+    "deploy": cmd_deploy,
+    "promote": cmd_promote,
+    "teardown": cmd_teardown,
+}
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    subcommand, rest = args[0], args[1:]
+    handler = COMMANDS.get(subcommand)
+    if handler is None:
+        print(f"[ERROR] Unknown subcommand: '{subcommand}'", file=sys.stderr)
+        print(f"  Available: {', '.join(COMMANDS)}", file=sys.stderr)
+        return 1
+    return handler(rest)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
