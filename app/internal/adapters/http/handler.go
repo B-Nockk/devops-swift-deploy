@@ -24,7 +24,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func (h *Handler) withCommonHeaders(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Deployed-By", "swiftdeploy")
+		// w.Header().Set("X-Deployed-By", "swiftdeploy")
 		if h.svc.IsCanary() {
 			// nginx is configured with proxy_pass_header X-Mode to forward this.
 			w.Header().Set("X-Mode", "canary")
