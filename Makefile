@@ -122,8 +122,8 @@ setup: ## System install: deps + chmod + build image (no venv)
 		cd app && go mod tidy 2>/dev/null || true; \
 	fi
 	@echo "Building Docker image..."
-	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile ./app 2>/dev/null || \
-		echo "Docker not available or build failed — skipping image build. Run 'make build' when Docker is ready."
+	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile . || \
+		echo "Docker build failed. Run 'make build' to see detailed errors."
 	@echo ""
 	@echo "✓ SwiftDeploy is ready. Run 'make deploy' to start the stack."
 
@@ -154,8 +154,8 @@ setup-venv: ## Venv install: create venv + deps + chmod + build (no activation n
 		cd app && go mod tidy 2>/dev/null || true; \
 	fi
 	@echo "Building Docker image..."
-	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile ./app 2>/dev/null || \
-		echo "Docker not available — skipping image build. Run 'make build' when Docker is ready."
+	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile . || \
+		echo "Docker build failed. Run 'make build' to see detailed errors."
 	@echo ""
 	@echo "✓ SwiftDeploy is ready. Run 'make deploy' — no activation needed."
 	@echo "  (make auto-detects the venv and uses it for all subsequent commands)"
