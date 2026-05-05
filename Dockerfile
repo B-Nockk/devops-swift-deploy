@@ -1,5 +1,3 @@
-# /app/Dockerfile
-
 # ============================================================
 # Stage 1: Builder
 # Full Go toolchain — this stage is discarded after compile.
@@ -12,16 +10,13 @@ RUN apk add --no-cache git ca-certificates
 WORKDIR /build
 
 # Copy dependency manifests first.
-# Docker layer-caches this step — module downloads only re-run when
-# go.mod or go.sum change, not on every source file edit.
-COPY go.mod go.sum* ./
+# Prefixed with app/ because the Dockerfile is at the root.
+COPY app/go.mod app/go.sum* ./
 RUN go mod download
 
 # Copy source and compile.
-# CGO_ENABLED=0   → fully static binary, no glibc dependency
-# -trimpath       → strips local build paths (reproducibility + security)
-# -ldflags -s -w  → strips DWARF debug info and symbol table (~30% smaller binary)
-COPY . .
+# Pulls the rest of the Go source code from the app/ directory.
+COPY app/ ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath \
     -ldflags="-s -w" \
