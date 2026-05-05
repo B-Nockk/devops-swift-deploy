@@ -117,7 +117,7 @@ func (h *Handler) welcome(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 	handler := chain(
 		func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
+			if r.Method != http.MethodGet {
 				writeJSON(w, http.StatusMethodNotAllowed, core.ErrorResponse{Error: "method not allowed"})
 				return
 			}
