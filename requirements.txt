@@ -1,0 +1,15 @@
+# /requirements.txt
+# Python dependencies for the SwiftDeploy CLI
+# Install: pip install -r requirements.txt
+# Or via make: make deps
+
+# YAML parsing — used for manifest.yaml loading and validation
+PyYAML>=6.0
+
+# Template rendering — used to generate nginx.conf and docker-compose.yml
+Jinja2>=3.1
+
+# YAML round-trip writing — preserves comments, key order, and quoting
+# on manifest.yaml writes during `swiftdeploy promote`
+# PyYAML cannot do this safely — ruamel.yaml is required
+ruamel.yaml>=0.18

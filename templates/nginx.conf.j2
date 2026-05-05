@@ -22,7 +22,8 @@ http {
     log_format swiftdeploy_fmt
         '$time_iso8601 | $status | ${request_time}s | $upstream_addr | $request';
 
-    access_log /var/log/nginx/access.log swiftdeploy_fmt;
+    # access_log /var/log/nginx/access.log swiftdeploy_fmt;
+    access_log /var/log/nginx/hng-access.log swiftdeploy_fmt;
     error_log  /var/log/nginx/error.log warn;
 
     sendfile           on;

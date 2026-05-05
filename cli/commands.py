@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -32,40 +33,139 @@ import yaml
 from ruamel.yaml import YAML
 
 from .config import (
+    ResolvedConfig,
     check_required_fields,
+    load_manifest,
     resolve,
 )
 from .generator import generate_all, generate_compose_only
 
+
 # ---------------------------------------------------------------------------
 # ANSI colours — degrade gracefully if terminal doesn't support them
 # ---------------------------------------------------------------------------
-_GREEN = "\033[32m"
-_RED = "\033[31m"
+_GREEN  = "\033[32m"
+_RED    = "\033[31m"
 _YELLOW = "\033[33m"
-_CYAN = "\033[36m"
-_RESET = "\033[0m"
-_BOLD = "\033[1m"
+_CYAN   = "\033[36m"
+_RESET  = "\033[0m"
+_BOLD   = "\033[1m"
+
+def _ok(msg: str)   -> str: return f"{_GREEN}[PASS]{_RESET} {msg}"
+def _fail(msg: str) -> str: return f"{_RED}[FAIL]{_RESET} {msg}"
+def _info(msg: str) -> str: return f"{_CYAN}  →{_RESET} {msg}"
+def _warn(msg: str) -> str: return f"{_YELLOW}[WARN]{_RESET} {msg}"
+def _bold(msg: str) -> str: return f"{_BOLD}{msg}{_RESET}"
 
 
-def _ok(msg: str) -> str:
-    return f"{_GREEN}[PASS]{_RESET} {msg}"
+# ---------------------------------------------------------------------------
+# validate
+# ---------------------------------------------------------------------------
+def validate(
+    manifest_path: Path,
+    templates_dir: Path,
+    output_dir: Path,
+    extra_args: list[str],
+) -> int:
+    """
+    Run 5 pre-flight checks. Print PASS/FAIL for each.
+    Exit non-zero if any check fails.
+    """
+    print(_bold("\n── SwiftDeploy Pre-flight Validation ──\n"))
+    failures: list[str] = []
 
+    def record(passed: bool, label: str, detail: str = "") -> None:
+        if passed:
+            print(_ok(label))
+        else:
+            print(_fail(label))
+            if detail:
+                print(f"       {detail}")
+            failures.append(label)
 
-def _fail(msg: str) -> str:
-    return f"{_RED}[FAIL]{_RESET} {msg}"
+    # ── Check 1: manifest.yaml exists and is valid YAML ──────────────────────
+    manifest_raw = None
+    if not manifest_path.exists():
+        record(False, "manifest.yaml exists and is valid YAML",
+               f"Not found at: {manifest_path}")
+    else:
+        try:
+            with manifest_path.open() as f:
+                manifest_raw = yaml.safe_load(f)
+            record(True, "manifest.yaml exists and is valid YAML")
+        except yaml.YAMLError as exc:
+            record(False, "manifest.yaml exists and is valid YAML", str(exc))
 
+    # ── Check 2: all required fields present and non-empty ───────────────────
+    if manifest_raw is not None:
+        errors = check_required_fields(manifest_raw)
+        if errors:
+            for err in errors:
+                record(False, "All required fields present and non-empty", err)
+        else:
+            record(True, "All required fields present and non-empty")
+    else:
+        record(False, "All required fields present and non-empty",
+               "Skipped — manifest could not be loaded")
 
-def _info(msg: str) -> str:
-    return f"{_CYAN}  →{_RESET} {msg}"
+    # ── Check 3: Docker image exists locally ─────────────────────────────────
+    image = None
+    if manifest_raw:
+        try:
+            cfg = resolve(manifest_path, extra_args)
+            image = cfg.service_image
+        except SystemExit:
+            pass
 
+    if image:
+        ok, detail = _docker_image_exists(image)
+        record(ok, f"Docker image '{image}' exists locally", detail)
+    else:
+        record(False, "Docker image exists locally", "Could not resolve image name from manifest")
 
-def _warn(msg: str) -> str:
-    return f"{_YELLOW}[WARN]{_RESET} {msg}"
+    # ── Check 4: nginx port not already bound on the host ────────────────────
+    nginx_port = None
+    if manifest_raw:
+        try:
+            cfg = resolve(manifest_path, extra_args)
+            nginx_port = cfg.nginx_port
+        except SystemExit:
+            pass
 
+    if nginx_port:
+        port_free = _is_port_free(nginx_port)
+        record(
+            port_free,
+            f"Nginx port {nginx_port} is not already bound on the host",
+            f"Something is already listening on port {nginx_port}. "
+            f"Run: lsof -i :{nginx_port}" if not port_free else "",
+        )
+    else:
+        record(False, "Nginx port is not already bound on the host",
+               "Could not resolve nginx port from manifest")
 
-def _bold(msg: str) -> str:
-    return f"{_BOLD}{msg}{_RESET}"
+    # ── Check 5: generated nginx.conf is syntactically valid ─────────────────
+    nginx_conf = output_dir / "nginx.conf"
+    if not nginx_conf.exists():
+        record(False, "nginx.conf is syntactically valid",
+               "nginx.conf not found — run: swiftdeploy init")
+    else:
+        try:
+            valid, detail = _validate_nginx_conf(nginx_conf)
+            record(valid, "nginx.conf is syntactically valid", detail)
+        except FileNotFoundError:
+            record(False, "nginx.conf is syntactically valid",
+                   "Docker not available — cannot run nginx -t validation")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print()
+    if not failures:
+        print(f"{_GREEN}{_BOLD}✓ All checks passed — stack is ready to deploy.{_RESET}\n")
+        return 0
+    else:
+        count = len(failures)
+        print(f"{_RED}{_BOLD}✗ {count} check(s) failed — resolve the above before deploying.{_RESET}\n")
+        return 1
 
 
 def _docker_image_exists(image: str) -> tuple[bool, str]:
@@ -93,7 +193,7 @@ def _is_port_free(port: int) -> bool:
             s.connect(("127.0.0.1", port))
             return False  # connection succeeded → port is occupied
         except (ConnectionRefusedError, OSError):
-            return True  # connection refused → port is free
+            return True   # connection refused → port is free
 
 
 def _validate_nginx_conf(nginx_conf: Path) -> tuple[bool, str]:
@@ -104,16 +204,10 @@ def _validate_nginx_conf(nginx_conf: Path) -> tuple[bool, str]:
     """
     result = subprocess.run(
         [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{nginx_conf.resolve()}:/etc/nginx/nginx.conf:ro",
+            "docker", "run", "--rm",
+            "-v", f"{nginx_conf.resolve()}:/etc/nginx/nginx.conf:ro",
             "nginx:latest",
-            "nginx",
-            "-t",
-            "-c",
-            "/etc/nginx/nginx.conf",
+            "nginx", "-t", "-c", "/etc/nginx/nginx.conf",
         ],
         capture_output=True,
         text=True,
@@ -128,265 +222,9 @@ def _validate_nginx_conf(nginx_conf: Path) -> tuple[bool, str]:
     return False, detail
 
 
-def _wait_for_health(url: str, timeout: int, interval: int) -> bool:
-    """
-    Poll a URL every `interval` seconds until it returns HTTP 200
-    or `timeout` seconds elapse.
-    Returns True if healthy, False on timeout.
-    """
-    deadline = time.time() + timeout
-    attempt = 0
-    while time.time() < deadline:
-        attempt += 1
-        try:
-            with urllib.request.urlopen(url, timeout=3) as resp:
-                if resp.status == 200:
-                    print(
-                        f"\r  {_GREEN}✓{_RESET} Healthy after ~{attempt * interval}s",
-                        end="",
-                    )
-                    sys.stdout.flush()
-                    return True
-        except Exception:
-            pass
-        print(f"\r  Attempt {attempt} — waiting...", end="")
-        sys.stdout.flush()
-        time.sleep(interval)
-    return False
-
-
-def _update_manifest_mode(manifest_path: Path, mode: str) -> None:
-    """
-    Update the `mode` field in manifest.yaml in-place.
-
-    Uses ruamel.yaml which preserves:
-      - Comments
-      - Key ordering
-      - Quoting style
-      - Indentation
-
-    PyYAML would strip all of the above — never use it for writes.
-    """
-    ryaml = YAML()
-    ryaml.preserve_quotes = True
-
-    with manifest_path.open() as f:
-        data = ryaml.load(f)
-
-    data["mode"] = mode
-
-    with manifest_path.open("w") as f:
-        ryaml.dump(data, f)
-
-
-def _confirm_mode(health_url: str, expected_mode: str, nginx_port: int) -> bool:
-    """
-    Hit /healthz and verify the service is actually running the expected mode.
-    For canary: check X-Mode header is present.
-    For stable: check X-Mode header is absent.
-    Also hits GET / to verify mode field in the response body.
-    """
-    root_url = health_url.replace("/healthz", "/")
-    try:
-        req = urllib.request.Request(root_url)
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            body = json.loads(resp.read().decode())
-            x_mode = resp.headers.get("X-Mode", "")
-
-            body_mode = body.get("mode", "")
-            if body_mode != expected_mode:
-                print(
-                    f"\n  Body mode mismatch: got '{body_mode}', expected '{expected_mode}'"
-                )
-                return False
-
-            if expected_mode == "canary" and x_mode != "canary":
-                print(f"\n  X-Mode header missing or wrong: got '{x_mode}'")
-                return False
-
-            if expected_mode == "stable" and x_mode == "canary":
-                print(f"\n  X-Mode {x_mode} header still present in stable mode. expexted: {expected_mode} ")
-                return False
-
-            return True
-    except Exception as exc:
-        print(f"\n  Could not reach service to confirm mode: {exc}")
-        return False
-
-
-def _compose(cwd: Path, compose_args: list[str]) -> subprocess.CompletedProcess:
-    """
-    Run `docker compose <args>` in the given working directory.
-
-    Uses `docker compose` (v2 plugin) with `docker-compose` (v1) as fallback.
-    Streams stderr so the user sees progress in real time for long operations.
-    """
-
-    def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-        )
-
-    try:
-        result = _run(["docker", "compose"] + compose_args)
-    except FileNotFoundError:
-        # Return a fake failure result so callers handle it uniformly
-        return subprocess.CompletedProcess(
-            args=["docker", "compose"] + compose_args,
-            returncode=1,
-            stdout="",
-            stderr="Docker is not installed or not on PATH",
-        )
-
-    # Fallback to docker-compose v1 if docker compose plugin not found
-    if result.returncode != 0 and "unknown command" in (result.stderr or "").lower():
-        try:
-            result = _run(["docker-compose"] + compose_args)
-        except FileNotFoundError:
-            pass
-
-    return result
-
-
-# ======================================================================
-# Behaviour
-# ======================================================================
-
-
-def validate(
-    manifest_path: Path,
-    output_dir: Path,
-    extra_args: list[str],
-) -> int:
-    """
-    Run 5 pre-flight checks. Print PASS/FAIL for each.
-    Exit non-zero if any check fails.
-    """
-    print(_bold("\n── SwiftDeploy Pre-flight Validation ──\n"))
-    failures: list[str] = []
-
-    def record(passed: bool, label: str, detail: str = "") -> None:
-        if passed:
-            print(_ok(label))
-        else:
-            print(_fail(label))
-            if detail:
-                print(f"       {detail}")
-            failures.append(label)
-
-    # ── Check 1: manifest.yaml exists and is valid YAML ──────────────────────
-    manifest_raw = None
-    if not manifest_path.exists():
-        record(
-            False,
-            "manifest.yaml exists and is valid YAML",
-            f"Not found at: {manifest_path}",
-        )
-    else:
-        try:
-            with manifest_path.open() as f:
-                manifest_raw = yaml.safe_load(f)
-            record(True, "manifest.yaml exists and is valid YAML")
-        except yaml.YAMLError as exc:
-            record(False, "manifest.yaml exists and is valid YAML", str(exc))
-
-    # ── Check 2: all required fields present and non-empty ───────────────────
-    if manifest_raw is not None:
-        errors = check_required_fields(manifest_raw)
-        if errors:
-            for err in errors:
-                record(False, "All required fields present and non-empty", err)
-        else:
-            record(True, "All required fields present and non-empty")
-    else:
-        record(
-            False,
-            "All required fields present and non-empty",
-            "Skipped — manifest could not be loaded",
-        )
-
-    # ── Check 3: Docker image exists locally ─────────────────────────────────
-    image = None
-    if manifest_raw:
-        try:
-            cfg = resolve(manifest_path, extra_args)
-            image = cfg.service_image
-        except SystemExit:
-            pass
-
-    if image:
-        ok, detail = _docker_image_exists(image)
-        record(ok, f"Docker image '{image}' exists locally", detail)
-    else:
-        record(
-            False,
-            "Docker image exists locally",
-            "Could not resolve image name from manifest",
-        )
-
-    # ── Check 4: nginx port not already bound on the host ────────────────────
-    nginx_port = None
-    if manifest_raw:
-        try:
-            cfg = resolve(manifest_path, extra_args)
-            nginx_port = cfg.nginx_port
-        except SystemExit:
-            pass
-
-    if nginx_port:
-        port_free = _is_port_free(nginx_port)
-        record(
-            port_free,
-            f"Nginx port {nginx_port} is not already bound on the host",
-            f"Something is already listening on port {nginx_port}. "
-            f"Run: lsof -i :{nginx_port}"
-            if not port_free
-            else "",
-        )
-    else:
-        record(
-            False,
-            "Nginx port is not already bound on the host",
-            "Could not resolve nginx port from manifest",
-        )
-
-    # ── Check 5: generated nginx.conf is syntactically valid ─────────────────
-    nginx_conf = output_dir / "nginx.conf"
-    if not nginx_conf.exists():
-        record(
-            False,
-            "nginx.conf is syntactically valid",
-            "nginx.conf not found — run: swiftdeploy init",
-        )
-    else:
-        try:
-            valid, detail = _validate_nginx_conf(nginx_conf)
-            record(valid, "nginx.conf is syntactically valid", detail)
-        except FileNotFoundError:
-            record(
-                False,
-                "nginx.conf is syntactically valid",
-                "Docker not available — cannot run nginx -t validation",
-            )
-
-    # ── Summary ───────────────────────────────────────────────────────────────
-    print()
-    if not failures:
-        print(
-            f"{_GREEN}{_BOLD}✓ All checks passed — stack is ready to deploy.{_RESET}\n"
-        )
-        return 0
-    else:
-        count = len(failures)
-        print(
-            f"{_RED}{_BOLD}✗ {count} check(s) failed — resolve the above before deploying.{_RESET}\n"
-        )
-        return 1
-
-
+# ---------------------------------------------------------------------------
+# deploy
+# ---------------------------------------------------------------------------
 def deploy(
     manifest_path: Path,
     templates_dir: Path,
@@ -431,6 +269,33 @@ def deploy(
     return 0
 
 
+def _wait_for_health(url: str, timeout: int, interval: int) -> bool:
+    """
+    Poll a URL every `interval` seconds until it returns HTTP 200
+    or `timeout` seconds elapse.
+    Returns True if healthy, False on timeout.
+    """
+    deadline = time.time() + timeout
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:
+                if resp.status == 200:
+                    print(f"\r  {_GREEN}✓{_RESET} Healthy after ~{attempt * interval}s", end="")
+                    sys.stdout.flush()
+                    return True
+        except Exception:
+            pass
+        print(f"\r  Attempt {attempt} — waiting...", end="")
+        sys.stdout.flush()
+        time.sleep(interval)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# promote
+# ---------------------------------------------------------------------------
 def promote(
     manifest_path: Path,
     templates_dir: Path,
@@ -448,10 +313,8 @@ def promote(
     print(_bold(f"\n── SwiftDeploy Promote → {target_mode} ──\n"))
 
     if target_mode not in ("canary", "stable"):
-        print(
-            f"{_RED}✗ Invalid mode: '{target_mode}'. Must be 'canary' or 'stable'.{_RESET}",
-            file=sys.stderr,
-        )
+        print(f"{_RED}✗ Invalid mode: '{target_mode}'. Must be 'canary' or 'stable'.{_RESET}",
+              file=sys.stderr)
         return 1
 
     # ── Read current mode ─────────────────────────────────────────────────────
@@ -486,16 +349,12 @@ def promote(
     #   2. Wait for Docker's own healthcheck to pass before polling nginx
     #      (Docker healthcheck start_period=10s, so we wait 15s minimum)
     print(_info("Restarting app service with new MODE env var (nginx untouched)..."))
-    result = _compose(
-        output_dir,
-        [
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            "app",
-        ],
-    )
+    result = _compose(output_dir, [
+        "up", "-d",
+        "--no-deps",
+        "--force-recreate",
+        "app",
+    ])
     if result.returncode != 0:
         print(f"{_RED}✗ Service restart failed:{_RESET}")
         print(result.stderr or result.stdout)
@@ -514,15 +373,23 @@ def promote(
     time.sleep(15)
 
     # Poll through nginx — this confirms both the app is up AND nginx is routing
+    # healthy = _wait_for_health(health_url, timeout=60, interval=3)
+    # if not healthy:
+    #     print(f"\n{_RED}✗ Service did not become healthy within 60s after restart.{_RESET}")
+    #     print("  Diagnose with:")
+    #     print("    docker logs nockk-swiftdeploy-v1")
+    #     print("    docker inspect --format='{{.State.Health.Status}}' nockk-swiftdeploy-v1")
+    #     return 1
+
+    # Poll through nginx — this confirms both the app is up AND nginx is routing
     healthy = _wait_for_health(health_url, timeout=60, interval=3)
     if not healthy:
-        print(
-            f"\n{_RED}✗ Service did not become healthy within 60s after restart.{_RESET}"
-        )
-        print("  Diagnose with:")
-        print("    docker logs swiftdeploy-app")
-        print("    docker inspect --format='{{.State.Health.Status}}' swiftdeploy-app")
+        print(f"\n{_RED}✗ Service did not become healthy within 60s after restart.{_RESET}")
+        print("  Diagnose with:")
+        print(f"    docker logs {new_cfg.container_app_name}")
+        print(f"    docker inspect --format='{{{{.State.Health.Status}}}}' {new_cfg.container_app_name}")
         return 1
+
 
     # Verify the mode header/body reflects the new mode
     mode_confirmed = _confirm_mode(health_url, target_mode, new_cfg.nginx_port)
@@ -538,6 +405,63 @@ def promote(
         print("  Stable: chaos endpoint disabled, X-Mode header removed.")
     print()
     return 0
+
+
+def _update_manifest_mode(manifest_path: Path, mode: str) -> None:
+    """
+    Update the `mode` field in manifest.yaml in-place.
+
+    Uses ruamel.yaml which preserves:
+      - Comments
+      - Key ordering
+      - Quoting style
+      - Indentation
+
+    PyYAML would strip all of the above — never use it for writes.
+    """
+    ryaml = YAML()
+    ryaml.preserve_quotes = True
+
+    with manifest_path.open() as f:
+        data = ryaml.load(f)
+
+    data["mode"] = mode
+
+    with manifest_path.open("w") as f:
+        ryaml.dump(data, f)
+
+
+def _confirm_mode(health_url: str, expected_mode: str, nginx_port: int) -> bool:
+    """
+    Hit /healthz and verify the service is actually running the expected mode.
+    For canary: check X-Mode header is present.
+    For stable: check X-Mode header is absent.
+    Also hits GET / to verify mode field in the response body.
+    """
+    root_url = health_url.replace("/healthz", "/")
+    try:
+        req = urllib.request.Request(root_url)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode())
+            x_mode = resp.headers.get("X-Mode", "")
+
+            body_mode = body.get("mode", "")
+            if body_mode != expected_mode:
+                print(f"\n  Body mode mismatch: got '{body_mode}', expected '{expected_mode}'")
+                return False
+
+            if expected_mode == "canary" and x_mode != "canary":
+                print(f"\n  X-Mode header missing or wrong: got '{x_mode}'")
+                return False
+
+            if expected_mode == "stable" and x_mode == "canary":
+                print(f"\n  X-Mode header still present in stable mode")
+                return False
+
+            return True
+    except Exception as exc:
+        print(f"\n  Could not reach service to confirm mode: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -596,3 +520,42 @@ def teardown(
 
     print(f"\n{_GREEN}{_BOLD}✓ Teardown complete.{_RESET}\n")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Shared Docker Compose helper
+# ---------------------------------------------------------------------------
+def _compose(cwd: Path, compose_args: list[str]) -> subprocess.CompletedProcess:
+    """
+    Run `docker compose <args>` in the given working directory.
+
+    Uses `docker compose` (v2 plugin) with `docker-compose` (v1) as fallback.
+    Streams stderr so the user sees progress in real time for long operations.
+    """
+    def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+        )
+
+    try:
+        result = _run(["docker", "compose"] + compose_args)
+    except FileNotFoundError:
+        # Return a fake failure result so callers handle it uniformly
+        return subprocess.CompletedProcess(
+            args=["docker", "compose"] + compose_args,
+            returncode=1,
+            stdout="",
+            stderr="Docker is not installed or not on PATH",
+        )
+
+    # Fallback to docker-compose v1 if docker compose plugin not found
+    if result.returncode != 0 and "unknown command" in (result.stderr or "").lower():
+        try:
+            result = _run(["docker-compose"] + compose_args)
+        except FileNotFoundError:
+            pass
+
+    return result
