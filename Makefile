@@ -167,12 +167,12 @@ deps: ## Install Python deps into whichever env is active (venv or system)
 
 .PHONY: build
 build: ## Build the app Docker image
-	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile ./app
+	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile .
 	@echo "✓ Built $(IMAGE_NAME):$(IMAGE_TAG)"
  
 .PHONY: build-no-cache
 build-no-cache: ## Build the app Docker image with no layer cache
-	docker build --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile ./app
+	docker build --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile .
 	@echo "✓ Built $(IMAGE_NAME):$(IMAGE_TAG) (no cache)"
 
 .PHONY: which-python
