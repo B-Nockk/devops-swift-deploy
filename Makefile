@@ -104,24 +104,58 @@ define install_deps
 endef
 
 .PHONY: setup
-setup: ## System install: deps + chmod + build (no venv)
-	@echo "Installing Python dependencies (system/user)..."
-	@$(PIP) install pyyaml jinja2 ruamel.yaml --break-system-packages 2>/dev/null || \
-	 $(PIP) install pyyaml jinja2 ruamel.yaml --user
+setup: ## System install: deps + chmod + build image (no venv)
+	@echo "Checking Python..."
+	@python3 --version
+	@echo "Installing Python dependencies..."
+	@pip3 install -r requirements.txt --break-system-packages 2>/dev/null || \
+	 pip3 install -r requirements.txt --user
+	@echo "Making CLI executable..."
 	chmod +x $(CLI)
-	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile .
+	@echo "Checking for go.mod before building image..."
+	@if [ ! -f app/go.mod ]; then \
+		echo "go.mod not found — running go mod init in app/..."; \
+		cd app && go mod init github.com/swiftdeploy/app 2>/dev/null || true; \
+	fi
+	@if command -v go >/dev/null 2>&1 && [ -f app/go.mod ]; then \
+		echo "Running go mod tidy..."; \
+		cd app && go mod tidy 2>/dev/null || true; \
+	fi
+	@echo "Building Docker image..."
+	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile ./app 2>/dev/null || \
+		echo "Docker not available or build failed — skipping image build. Run 'make build' when Docker is ready."
 	@echo ""
 	@echo "✓ SwiftDeploy is ready. Run 'make deploy' to start the stack."
 
 .PHONY: setup-venv
-setup-venv: ## Venv install: create venv + deps + chmod + build (no activation needed after this)
+setup-venv: ## Venv install: create venv + deps + chmod + build (no activation needed after)
+	@echo "Checking for python3-venv..."
+	@python3 -m venv --help >/dev/null 2>&1 || { \
+		echo "python3-venv not found — attempting install..."; \
+		sudo apt-get install -y python3-venv 2>/dev/null || \
+		sudo apt-get install -y python-venv 2>/dev/null || \
+		{ echo "[ERROR] Could not install python3-venv. Install manually and retry."; exit 1; }; \
+	}
 	@echo "Creating virtual environment at ./venv ..."
 	python3 -m venv venv
-	@echo "Installing Python dependencies into venv..."
+	@echo "Upgrading pip..."
 	venv/bin/pip install --upgrade pip -q
-	venv/bin/pip install pyyaml jinja2 ruamel.yaml
+	@echo "Installing Python dependencies..."
+	venv/bin/pip install -r requirements.txt
+	@echo "Making CLI executable..."
 	chmod +x $(CLI)
-	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile .
+	@echo "Checking for go.mod before building image..."
+	@if [ ! -f app/go.mod ]; then \
+		echo "go.mod not found — running go mod init in app/..."; \
+		cd app && go mod init github.com/swiftdeploy/app 2>/dev/null || true; \
+	fi
+	@if command -v go >/dev/null 2>&1 && [ -f app/go.mod ]; then \
+		echo "Running go mod tidy..."; \
+		cd app && go mod tidy 2>/dev/null || true; \
+	fi
+	@echo "Building Docker image..."
+	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile ./app 2>/dev/null || \
+		echo "Docker not available — skipping image build. Run 'make build' when Docker is ready."
 	@echo ""
 	@echo "✓ SwiftDeploy is ready. Run 'make deploy' — no activation needed."
 	@echo "  (make auto-detects the venv and uses it for all subsequent commands)"
