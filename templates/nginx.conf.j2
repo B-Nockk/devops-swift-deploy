@@ -86,6 +86,16 @@ http {
         error_page 504 = @error_504;
 
         # -----------------------------------------------------------------------
+        # Docker internal DNS resolver
+        #
+        # Required when using set $upstream variable — nginx needs a resolver to
+        # look up the Docker hostname at request time. 127.0.0.11 is Docker's
+        # embedded DNS, always present inside any Docker network.
+        # valid=30s caches results. ipv6=off avoids AAAA lookup failures.
+        # -----------------------------------------------------------------------
+        resolver 127.0.0.11 valid=30s ipv6=off;
+
+        # -----------------------------------------------------------------------
         # Dashboard frontend
         #
         # Serves static files (index.html, index.css, metrics.js) from the
