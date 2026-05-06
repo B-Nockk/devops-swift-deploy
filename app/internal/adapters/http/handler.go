@@ -14,11 +14,59 @@ type Handler struct {
 	svc core.ServicePort
 }
 
+// statusRecorder wraps http.ResponseWriter to capture the status code written
+// by downstream handlers. Go's ResponseWriter doesn't expose the written status
+// after the fact, so we intercept WriteHeader and remember it.
+// The zero value is intentionally not useful — always construct via newStatusRecorder.
+type statusRecorder struct {
+	http.ResponseWriter
+	status  int
+	written bool
+}
+
+func newStatusRecorder(w http.ResponseWriter) *statusRecorder {
+	return &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if !r.written {
+		r.status = code
+		r.written = true
+		r.ResponseWriter.WriteHeader(code)
+	}
+}
+
+// Write satisfies http.ResponseWriter. If the handler calls Write without a
+// prior WriteHeader, the status defaults to 200 — match that behaviour here.
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if !r.written {
+		r.written = true
+		// status is already defaulted to 200 in newStatusRecorder
+	}
+	return r.ResponseWriter.Write(b)
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		log.Printf("writeJSON encode error: %v", err)
+	}
+}
+
+// withMetrics records method, matched path, status code, and duration for
+// every request EXCEPT /metrics itself (to avoid self-referential noise).
+// Must be the outermost middleware so it captures the full round-trip duration.
+func (h *Handler) withMetrics(pattern string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pattern == "/metrics" {
+			next(w, r)
+			return
+		}
+		rec := newStatusRecorder(w)
+		start := time.Now()
+		next(rec, r)
+		h.svc.RecordRequest(r.Method, pattern, rec.status, time.Since(start).Seconds())
 	}
 }
 
@@ -129,10 +177,25 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 	handler(w, r)
 }
 
+func (h *Handler) metrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, core.ErrorResponse{Error: "method not allowed"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(h.svc.RenderMetrics())); err != nil {
+		log.Printf("metrics write error: %v", err)
+	}
+}
+
+// Register wires all routes. withMetrics is the outermost wrapper on every
+// route — it sees the full request/response cycle including all inner middleware.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/", h.welcome)
-	mux.HandleFunc("/healthz", h.healthz)
-	mux.HandleFunc("/chaos", h.chaos)
+	mux.HandleFunc("/", h.withMetrics("/", h.welcome))
+	mux.HandleFunc("/healthz", h.withMetrics("/healthz", h.healthz))
+	mux.HandleFunc("/chaos", h.withMetrics("/chaos", h.chaos))
+	mux.HandleFunc("/metrics", h.withMetrics("/metrics", h.metrics))
 }
 
 func NewHandler(svc core.ServicePort) *Handler {

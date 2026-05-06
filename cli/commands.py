@@ -9,14 +9,16 @@ Each function is a Use Case (Application Service in DDD terms):
 
 Subcommands:
   validate  — 5 pre-flight checks, exit non-zero on any failure
-  deploy    — init + docker compose up + health gate (60s timeout)
-  promote   — switch mode, regen compose, rolling restart, confirm
+  deploy    — init + OPA pre-deploy check + docker compose up + health gate
+  promote   — switch mode, regen compose, rolling restart, OPA check, confirm
   teardown  — bring stack down; --clean removes generated files
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -27,11 +29,10 @@ from pathlib import Path
 from typing import Callable
 
 import yaml
-
-# ruamel.yaml preserves comments and key order on write — critical for promote.
-# PyYAML would strip comments and reorder keys, corrupting the manifest.
 from ruamel.yaml import YAML
 
+from . import metrics as metrics_client
+from . import opa
 from .config import (
     ResolvedConfig,
     check_required_fields,
@@ -40,22 +41,35 @@ from .config import (
 )
 from .generator import generate_all, generate_compose_only
 
-
 # ---------------------------------------------------------------------------
 # ANSI colours — degrade gracefully if terminal doesn't support them
 # ---------------------------------------------------------------------------
-_GREEN  = "\033[32m"
-_RED    = "\033[31m"
+_GREEN = "\033[32m"
+_RED = "\033[31m"
 _YELLOW = "\033[33m"
-_CYAN   = "\033[36m"
-_RESET  = "\033[0m"
-_BOLD   = "\033[1m"
+_CYAN = "\033[36m"
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
 
-def _ok(msg: str)   -> str: return f"{_GREEN}[PASS]{_RESET} {msg}"
-def _fail(msg: str) -> str: return f"{_RED}[FAIL]{_RESET} {msg}"
-def _info(msg: str) -> str: return f"{_CYAN}  →{_RESET} {msg}"
-def _warn(msg: str) -> str: return f"{_YELLOW}[WARN]{_RESET} {msg}"
-def _bold(msg: str) -> str: return f"{_BOLD}{msg}{_RESET}"
+
+def _ok(msg: str) -> str:
+    return f"{_GREEN}[PASS]{_RESET} {msg}"
+
+
+def _fail(msg: str) -> str:
+    return f"{_RED}[FAIL]{_RESET} {msg}"
+
+
+def _info(msg: str) -> str:
+    return f"{_CYAN}  →{_RESET} {msg}"
+
+
+def _warn(msg: str) -> str:
+    return f"{_YELLOW}[WARN]{_RESET} {msg}"
+
+
+def _bold(msg: str) -> str:
+    return f"{_BOLD}{msg}{_RESET}"
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +100,11 @@ def validate(
     # ── Check 1: manifest.yaml exists and is valid YAML ──────────────────────
     manifest_raw = None
     if not manifest_path.exists():
-        record(False, "manifest.yaml exists and is valid YAML",
-               f"Not found at: {manifest_path}")
+        record(
+            False,
+            "manifest.yaml exists and is valid YAML",
+            f"Not found at: {manifest_path}",
+        )
     else:
         try:
             with manifest_path.open() as f:
@@ -105,8 +122,11 @@ def validate(
         else:
             record(True, "All required fields present and non-empty")
     else:
-        record(False, "All required fields present and non-empty",
-               "Skipped — manifest could not be loaded")
+        record(
+            False,
+            "All required fields present and non-empty",
+            "Skipped — manifest could not be loaded",
+        )
 
     # ── Check 3: Docker image exists locally ─────────────────────────────────
     image = None
@@ -121,7 +141,11 @@ def validate(
         ok, detail = _docker_image_exists(image)
         record(ok, f"Docker image '{image}' exists locally", detail)
     else:
-        record(False, "Docker image exists locally", "Could not resolve image name from manifest")
+        record(
+            False,
+            "Docker image exists locally",
+            "Could not resolve image name from manifest",
+        )
 
     # ── Check 4: nginx port not already bound on the host ────────────────────
     nginx_port = None
@@ -137,34 +161,51 @@ def validate(
         record(
             port_free,
             f"Nginx port {nginx_port} is not already bound on the host",
-            f"Something is already listening on port {nginx_port}. "
-            f"Run: lsof -i :{nginx_port}" if not port_free else "",
+            (
+                f"Something is already listening on port {nginx_port}. "
+                f"Run: lsof -i :{nginx_port}"
+            )
+            if not port_free
+            else "",
         )
     else:
-        record(False, "Nginx port is not already bound on the host",
-               "Could not resolve nginx port from manifest")
+        record(
+            False,
+            "Nginx port is not already bound on the host",
+            "Could not resolve nginx port from manifest",
+        )
 
     # ── Check 5: generated nginx.conf is syntactically valid ─────────────────
     nginx_conf = output_dir / "nginx.conf"
     if not nginx_conf.exists():
-        record(False, "nginx.conf is syntactically valid",
-               "nginx.conf not found — run: swiftdeploy init")
+        record(
+            False,
+            "nginx.conf is syntactically valid",
+            "nginx.conf not found — run: swiftdeploy init",
+        )
     else:
         try:
             valid, detail = _validate_nginx_conf(nginx_conf)
             record(valid, "nginx.conf is syntactically valid", detail)
         except FileNotFoundError:
-            record(False, "nginx.conf is syntactically valid",
-                   "Docker not available — cannot run nginx -t validation")
+            record(
+                False,
+                "nginx.conf is syntactically valid",
+                "Docker not available — cannot run nginx -t validation",
+            )
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print()
     if not failures:
-        print(f"{_GREEN}{_BOLD}✓ All checks passed — stack is ready to deploy.{_RESET}\n")
+        print(
+            f"{_GREEN}{_BOLD}✓ All checks passed — stack is ready to deploy.{_RESET}\n"
+        )
         return 0
     else:
         count = len(failures)
-        print(f"{_RED}{_BOLD}✗ {count} check(s) failed — resolve the above before deploying.{_RESET}\n")
+        print(
+            f"{_RED}{_BOLD}✗ {count} check(s) failed — resolve the above before deploying.{_RESET}\n"
+        )
         return 1
 
 
@@ -193,33 +234,91 @@ def _is_port_free(port: int) -> bool:
             s.connect(("127.0.0.1", port))
             return False  # connection succeeded → port is occupied
         except (ConnectionRefusedError, OSError):
-            return True   # connection refused → port is free
+            return True  # connection refused → port is free
 
 
 def _validate_nginx_conf(nginx_conf: Path) -> tuple[bool, str]:
     """
     Validate nginx.conf syntax by running nginx -t inside a temporary container.
-    This avoids requiring nginx to be installed on the host.
-    Falls back to a structural heuristic if Docker is unavailable.
+    Avoids requiring nginx to be installed on the host.
     """
     result = subprocess.run(
         [
-            "docker", "run", "--rm",
-            "-v", f"{nginx_conf.resolve()}:/etc/nginx/nginx.conf:ro",
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{nginx_conf.resolve()}:/etc/nginx/nginx.conf:ro",
             "nginx:latest",
-            "nginx", "-t", "-c", "/etc/nginx/nginx.conf",
+            "nginx",
+            "-t",
+            "-c",
+            "/etc/nginx/nginx.conf",
         ],
         capture_output=True,
         text=True,
     )
     if result.returncode == 0:
         return True, ""
-
-    # nginx -t writes to stderr
-    detail = (result.stderr or result.stdout).strip()
-    # Trim verbose path noise for readability
-    detail = detail.replace("nginx: ", "").strip()
+    detail = (result.stderr or result.stdout).strip().replace("nginx: ", "").strip()
     return False, detail
+
+
+# ---------------------------------------------------------------------------
+# Host stats — collected for OPA pre-deploy check
+# ---------------------------------------------------------------------------
+
+
+def _collect_host_stats() -> dict:
+    """
+    Collect host resource stats for the OPA infrastructure policy check.
+
+    Uses /proc/loadavg for CPU load (Linux-specific, acceptable for a
+    containerised deployment tool running on Linux).
+    """
+    disk = shutil.disk_usage("/")
+    disk_free_gb = round(disk.free / (1024**3), 2)
+
+    try:
+        with open("/proc/loadavg") as f:
+            cpu_load = round(float(f.read().split()[0]), 2)
+    except OSError:
+        # macOS / non-Linux fallback — load average unavailable
+        cpu_load = 0.0
+
+    mem_free_percent = round(_get_mem_free_percent(), 2)
+
+    return {
+        "disk_free_gb": disk_free_gb,
+        "cpu_load": cpu_load,
+        "mem_free_percent": mem_free_percent,
+    }
+
+
+def _get_mem_free_percent() -> float:
+    """
+    Read free memory percentage from /proc/meminfo (Linux).
+    Returns 100.0 on non-Linux systems so policy checks don't false-positive.
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            lines = f.readlines()
+        info: dict[str, int] = {}
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2:
+                key = parts[0].rstrip(":")
+                try:
+                    info[key] = int(parts[1])
+                except ValueError:
+                    pass
+        total = info.get("MemTotal", 0)
+        available = info.get("MemAvailable", 0)
+        if total > 0:
+            return (available / total) * 100
+    except OSError:
+        pass
+    return 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -233,19 +332,33 @@ def deploy(
 ) -> int:
     """
     Full deployment sequence:
-      1. init  — generate configs
-      2. docker compose up -d
-      3. poll /healthz through nginx until healthy or 60s timeout
+      1. init          — generate configs
+      2. Policy check  — OPA pre-deploy (infrastructure)
+      3. docker compose up -d
+      4. Health gate   — poll /healthz through nginx (60s timeout)
     """
     print(_bold("\n── SwiftDeploy Deploy ──\n"))
 
-    # Step 1: init
+    # Step 1: generate configs
     print(_info("Generating configs..."))
     cfg = resolve(manifest_path, extra_args)
     nginx_path, compose_path = generate_all(cfg, templates_dir, output_dir)
     print(f"  Generated: {nginx_path.name}, {compose_path.name}")
 
-    # Step 2: bring stack up
+    # Step 2: OPA pre-deploy policy check
+    print(_info("Running pre-deploy policy checks..."))
+    host_stats = _collect_host_stats()
+    policy_result = opa.check_pre_deploy(host_stats)
+
+    if not policy_result:
+        for violation in policy_result.violations:
+            print(f"{_RED}[POLICY VIOLATION]{_RESET} {violation}")
+        print(f"\n{_RED}✗ Deployment blocked by policy.{_RESET}")
+        return 1
+
+    print(_ok("Pre-deploy policy checks passed"))
+
+    # Step 3: bring stack up
     print(_info("Starting stack with docker compose..."))
     result = _compose(output_dir, ["up", "-d", "--remove-orphans"])
     if result.returncode != 0:
@@ -253,7 +366,7 @@ def deploy(
         print(result.stderr or result.stdout)
         return 1
 
-    # Step 3: health gate
+    # Step 4: health gate
     health_url = f"http://localhost:{cfg.nginx_port}/healthz"
     print(_info(f"Waiting for stack to be healthy at {health_url} (timeout: 60s)..."))
 
@@ -273,7 +386,6 @@ def _wait_for_health(url: str, timeout: int, interval: int) -> bool:
     """
     Poll a URL every `interval` seconds until it returns HTTP 200
     or `timeout` seconds elapse.
-    Returns True if healthy, False on timeout.
     """
     deadline = time.time() + timeout
     attempt = 0
@@ -282,7 +394,10 @@ def _wait_for_health(url: str, timeout: int, interval: int) -> bool:
         try:
             with urllib.request.urlopen(url, timeout=3) as resp:
                 if resp.status == 200:
-                    print(f"\r  {_GREEN}✓{_RESET} Healthy after ~{attempt * interval}s", end="")
+                    print(
+                        f"\r  {_GREEN}✓{_RESET} Healthy after ~{attempt * interval}s",
+                        end="",
+                    )
                     sys.stdout.flush()
                     return True
         except Exception:
@@ -308,16 +423,19 @@ def promote(
       2. Update `mode` in manifest.yaml in-place (ruamel.yaml preserves formatting)
       3. Regenerate docker-compose.yml only (nginx.conf is mode-agnostic)
       4. Rolling restart of the app service container only
-      5. Confirm new mode via /healthz
+      5. Wait for health gate
+      6. OPA pre-promote policy check (uses live metrics from running stack)
+      7. Confirm new mode via GET /
     """
     print(_bold(f"\n── SwiftDeploy Promote → {target_mode} ──\n"))
 
     if target_mode not in ("canary", "stable"):
-        print(f"{_RED}✗ Invalid mode: '{target_mode}'. Must be 'canary' or 'stable'.{_RESET}",
-              file=sys.stderr)
+        print(
+            f"{_RED}✗ Invalid mode: '{target_mode}'. Must be 'canary' or 'stable'.{_RESET}",
+            file=sys.stderr,
+        )
         return 1
 
-    # ── Read current mode ─────────────────────────────────────────────────────
     cfg = resolve(manifest_path, [])
     current_mode = cfg.mode
 
@@ -334,7 +452,7 @@ def promote(
 
     # ── Step 2: Regenerate docker-compose.yml only ───────────────────────────
     print(_info("Regenerating docker-compose.yml..."))
-    new_cfg = resolve(manifest_path, [])  # re-resolve with updated manifest
+    new_cfg = resolve(manifest_path, [])
     generate_compose_only(new_cfg, templates_dir, output_dir)
     print("  docker-compose.yml updated")
 
@@ -349,12 +467,16 @@ def promote(
     #   2. Wait for Docker's own healthcheck to pass before polling nginx
     #      (Docker healthcheck start_period=10s, so we wait 15s minimum)
     print(_info("Restarting app service with new MODE env var (nginx untouched)..."))
-    result = _compose(output_dir, [
-        "up", "-d",
-        "--no-deps",
-        "--force-recreate",
-        "app",
-    ])
+    result = _compose(
+        output_dir,
+        [
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "app",
+        ],
+    )
     if result.returncode != 0:
         print(f"{_RED}✗ Service restart failed:{_RESET}")
         print(result.stderr or result.stdout)
@@ -362,36 +484,61 @@ def promote(
         _update_manifest_mode(manifest_path, current_mode)
         return 1
 
-    # ── Step 4: Wait for Docker healthcheck, then confirm via nginx ───────────
-    print(_info("Confirming new mode via /healthz..."))
-    health_url = f"http://localhost:{new_cfg.nginx_port}/healthz"
-
-    # Wait for Docker's healthcheck start_period + a margin before polling.
-    # The compose healthcheck has start_period=10s — polling before that
-    # just burns attempts against a container nginx won't route to yet.
+    # ── Step 4: Wait for Docker healthcheck start_period, then health gate ───
+    print(_info("Confirming service health via nginx /healthz..."))
     print(_info("  Waiting 15s for container healthcheck start_period..."))
     time.sleep(15)
 
-    # Poll through nginx — this confirms both the app is up AND nginx is routing
-    # healthy = _wait_for_health(health_url, timeout=60, interval=3)
-    # if not healthy:
-    #     print(f"\n{_RED}✗ Service did not become healthy within 60s after restart.{_RESET}")
-    #     print("  Diagnose with:")
-    #     print("    docker logs nockk-swiftdeploy-v1")
-    #     print("    docker inspect --format='{{.State.Health.Status}}' nockk-swiftdeploy-v1")
-    #     return 1
-
-    # Poll through nginx — this confirms both the app is up AND nginx is routing
+    health_url = f"http://localhost:{new_cfg.nginx_port}/healthz"
     healthy = _wait_for_health(health_url, timeout=60, interval=3)
     if not healthy:
-        print(f"\n{_RED}✗ Service did not become healthy within 60s after restart.{_RESET}")
-        print("  Diagnose with:")
-        print(f"    docker logs {new_cfg.container_app_name}")
-        print(f"    docker inspect --format='{{{{.State.Health.Status}}}}' {new_cfg.container_app_name}")
+        print(
+            f"\n{_RED}✗ Service did not become healthy within 60s after restart.{_RESET}"
+        )
+        print("  Diagnose with:")
+        print(f"    docker logs {new_cfg.container_app_name}")
+        print(
+            f"    docker inspect --format='{{{{.State.Health.Status}}}}' {new_cfg.container_app_name}"
+        )
         return 1
 
+    # ── Step 5: OPA pre-promote policy check ─────────────────────────────────
+    #
+    # Scrape live metrics now that the restarted container is healthy.
+    # We use snapshot_from_scrape (single scrape) rather than a 30s window
+    # because we've just restarted — there's no meaningful prior scrape to diff.
+    # The operator should run `swiftdeploy status` to monitor a live window
+    # before promoting if they want windowed data.
+    print(_info("Running pre-promote policy checks..."))
+    scrape = metrics_client.scrape(new_cfg.nginx_port)
 
-    # Verify the mode header/body reflects the new mode
+    if scrape is None:
+        print(
+            f"{_RED}[POLICY VIOLATION]{_RESET} Could not scrape /metrics — is the stack running?"
+        )
+        print(f"\n{_RED}✗ Promotion blocked: metrics unavailable.{_RESET}")
+        return 1
+
+    window = metrics_client.snapshot_from_scrape(scrape)
+    metrics_dict = {
+        "error_rate": window.error_rate,
+        "p99_latency_ms": window.p99_latency_ms,
+    }
+
+    policy_result = opa.check_pre_promote(metrics_dict, target_mode)
+
+    if not policy_result:
+        for violation in policy_result.violations:
+            print(f"{_RED}[POLICY VIOLATION]{_RESET} {violation}")
+        print(f"\n{_RED}✗ Promotion blocked by policy.{_RESET}")
+        print(_warn("Rolling back manifest.yaml to previous mode..."))
+        _update_manifest_mode(manifest_path, current_mode)
+        generate_compose_only(cfg, templates_dir, output_dir)
+        return 1
+
+    print(_ok("Pre-promote policy checks passed"))
+
+    # ── Step 6: Confirm mode in response body and headers ────────────────────
     mode_confirmed = _confirm_mode(health_url, target_mode, new_cfg.nginx_port)
     if not mode_confirmed:
         print(f"\n{_RED}✗ Service is healthy but mode has not switched yet.{_RESET}")
@@ -413,7 +560,7 @@ def _update_manifest_mode(manifest_path: Path, mode: str) -> None:
 
     Uses ruamel.yaml which preserves:
       - Comments
-      - Key ordering
+      - Key order
       - Quoting style
       - Indentation
 
@@ -433,10 +580,9 @@ def _update_manifest_mode(manifest_path: Path, mode: str) -> None:
 
 def _confirm_mode(health_url: str, expected_mode: str, nginx_port: int) -> bool:
     """
-    Hit /healthz and verify the service is actually running the expected mode.
-    For canary: check X-Mode header is present.
-    For stable: check X-Mode header is absent.
-    Also hits GET / to verify mode field in the response body.
+    Hit GET / and verify the service body and headers reflect the expected mode.
+    Canary: X-Mode header must be present.
+    Stable: X-Mode header must be absent.
     """
     root_url = health_url.replace("/healthz", "/")
     try:
@@ -447,7 +593,9 @@ def _confirm_mode(health_url: str, expected_mode: str, nginx_port: int) -> bool:
 
             body_mode = body.get("mode", "")
             if body_mode != expected_mode:
-                print(f"\n  Body mode mismatch: got '{body_mode}', expected '{expected_mode}'")
+                print(
+                    f"\n  Body mode mismatch: got '{body_mode}', expected '{expected_mode}'"
+                )
                 return False
 
             if expected_mode == "canary" and x_mode != "canary":
@@ -455,7 +603,7 @@ def _confirm_mode(health_url: str, expected_mode: str, nginx_port: int) -> bool:
                 return False
 
             if expected_mode == "stable" and x_mode == "canary":
-                print(f"\n  X-Mode header still present in stable mode")
+                print(f"\n  X-Mode header still present in {expected_mode} mode")
                 return False
 
             return True
@@ -474,15 +622,6 @@ def teardown(
 ) -> int:
     """
     Bring the stack down and optionally remove generated configs.
-
-    docker compose down -v removes:
-      - All service containers
-      - The defined network (swiftdeploy-net)
-      - Named volumes (app_logs, nginx_logs)
-
-    --clean additionally removes:
-      - nginx.conf
-      - docker-compose.yml
     """
     print(_bold("\n── SwiftDeploy Teardown ──\n"))
 
@@ -490,7 +629,6 @@ def teardown(
     result = _compose(output_dir, ["down", "-v", "--remove-orphans"])
 
     if result.returncode != 0:
-        # Non-zero can mean "nothing was running" — not always fatal
         stderr = (result.stderr or "").strip()
         if "no configuration file" in stderr.lower():
             print(_warn("docker-compose.yml not found — stack may already be down."))
@@ -528,10 +666,9 @@ def teardown(
 def _compose(cwd: Path, compose_args: list[str]) -> subprocess.CompletedProcess:
     """
     Run `docker compose <args>` in the given working directory.
-
-    Uses `docker compose` (v2 plugin) with `docker-compose` (v1) as fallback.
-    Streams stderr so the user sees progress in real time for long operations.
+    Falls back to `docker-compose` (v1) if the v2 plugin is not found.
     """
+
     def _run(cmd: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(
             cmd,
@@ -543,7 +680,6 @@ def _compose(cwd: Path, compose_args: list[str]) -> subprocess.CompletedProcess:
     try:
         result = _run(["docker", "compose"] + compose_args)
     except FileNotFoundError:
-        # Return a fake failure result so callers handle it uniformly
         return subprocess.CompletedProcess(
             args=["docker", "compose"] + compose_args,
             returncode=1,
@@ -551,7 +687,6 @@ def _compose(cwd: Path, compose_args: list[str]) -> subprocess.CompletedProcess:
             stderr="Docker is not installed or not on PATH",
         )
 
-    # Fallback to docker-compose v1 if docker compose plugin not found
     if result.returncode != 0 and "unknown command" in (result.stderr or "").lower():
         try:
             result = _run(["docker-compose"] + compose_args)

@@ -41,6 +41,7 @@ type Service struct {
 	version   string
 	startTime time.Time
 	store     ChaosStore
+	metrics   MetricsStore
 }
 
 // ===========================================================================
@@ -71,6 +72,7 @@ type ErrorResponse struct {
 // ===========================================================================
 // variable declarations
 // ===========================================================================
+
 // Domain-level errors — adapters translate these to HTTP status codes.
 var (
 	ErrChaosUnavailable = errors.New("chaos endpoint only available in canary mode")
@@ -81,12 +83,13 @@ var (
 // Behaviour
 // ===========================================================================
 
-func NewService(mode Mode, version string, store ChaosStore) *Service {
+func NewService(mode Mode, version string, store ChaosStore, metrics MetricsStore) *Service {
 	return &Service{
 		mode:      mode,
 		version:   version,
 		startTime: time.Now(),
 		store:     store,
+		metrics:   metrics,
 	}
 }
 
@@ -96,18 +99,15 @@ func (c ChaosCommand) Validate() error {
 		if c.Duration <= 0 {
 			return errors.New("slow mode requires duration > 0")
 		}
-
 	case ChaosModeError:
 		if c.Rate <= 0 || c.Rate > 1 {
 			return errors.New("error mode require rate between 0 & 1 (exclusive)")
 		}
-
 	case ChaosModeRecover:
-	// always valid
+		// always valid
 	default:
 		return errors.New("unknown chaos mode: must be slow, error, or recover")
 	}
-
 	return nil
 }
 
@@ -140,7 +140,7 @@ func (s *Service) BuildHealth() HealthResponse {
 }
 
 func (s *Service) ApplyChaos(cmd ChaosCommand) (ChaosResponse, error) {
-	if s.mode == ModeCanary {
+	if s.mode == ModeStable {
 		return ChaosResponse{}, ErrChaosUnavailable
 	}
 
@@ -166,4 +166,20 @@ func (s *Service) GetChaosState() (ChaosState, error) {
 
 func (s *Service) IsCanary() bool {
 	return s.mode == ModeCanary
+}
+
+// RecordRequest delegates to the MetricsStore. Called by the HTTP adapter's
+// metrics middleware after each completed request.
+func (s *Service) RecordRequest(method, path string, statusCode int, durationSeconds float64) {
+	s.metrics.Record(method, path, statusCode, durationSeconds)
+}
+
+// MetricsSnapshot returns a point-in-time view of all metrics.
+func (s *Service) MetricsSnapshot() MetricsSnapshot {
+	return s.metrics.Snapshot()
+}
+
+// RenderMetrics returns the Prometheus text exposition body.
+func (s *Service) RenderMetrics() string {
+	return s.metrics.Render()
 }

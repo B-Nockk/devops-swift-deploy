@@ -23,7 +23,6 @@ import yaml
 
 from .env import REQUIRED_ENV, resolve_required
 
-
 # ---------------------------------------------------------------------------
 # REQUIRED_FIELDS — validated against the raw manifest by `swiftdeploy validate`.
 # These are the minimum fields the spec mandates must be present in manifest.yaml.
@@ -49,51 +48,52 @@ REQUIRED_FIELDS: list[tuple[str, ...]] = [
 @dataclass
 class ResolvedConfig:
     # services
-    service_image:   str
-    service_port:    int
+    service_image: str
+    service_port: int
     service_version: str
-    restart_policy:  str
+    restart_policy: str
 
     # nginx
-    nginx_image:     str
-    nginx_port:      int
-    proxy_timeout:   int
-    contact:         str
+    nginx_image: str
+    nginx_port: int
+    proxy_timeout: int
+    contact: str
 
     # network
-    network_name:    str
-    network_driver:  str
+    network_name: str
+    network_driver: str
 
     # runtime
-    mode:            str
+    mode: str
 
     # container env vars
-    container_app_name:   str = "nockk-swiftdeploy-v1"
+    container_app_name: str = "nockk-swiftdeploy-v1"
     container_nginx_name: str = "nockk-nginx-v1"
-
+    container_opa_name: str = "swiftdeploy-opa"
 
     # derived — computed for templates, not in manifest
-    service_host:    str = "app"
-    service_name:    str = "nockk-swiftdeploy-v1"
+    service_host: str = "app"
+    service_name: str = "nockk-swiftdeploy-v1"
 
     def as_template_vars(self) -> dict[str, Any]:
         """Return a flat dict suitable for Jinja2 template rendering."""
         return {
-            "service_image":   self.service_image,
-            "service_port":    self.service_port,
-            "service_host":    self.service_host,
-            "service_name":    self.service_name,
-            "app_version":     self.service_version,
-            "restart_policy":  self.restart_policy,
-            "nginx_image":     self.nginx_image,
-            "nginx_port":      self.nginx_port,
-            "proxy_timeout":   self.proxy_timeout,
-            "contact":         self.contact,
-            "network_name":    self.network_name,
-            "network_driver":  self.network_driver,
-            "mode":            self.mode,
-            "container_app_name":   self.container_app_name,
+            "service_image": self.service_image,
+            "service_port": self.service_port,
+            "service_host": self.service_host,
+            "service_name": self.service_name,
+            "app_version": self.service_version,
+            "restart_policy": self.restart_policy,
+            "nginx_image": self.nginx_image,
+            "nginx_port": self.nginx_port,
+            "proxy_timeout": self.proxy_timeout,
+            "contact": self.contact,
+            "network_name": self.network_name,
+            "network_driver": self.network_driver,
+            "container_app_name": self.container_app_name,
             "container_nginx_name": self.container_nginx_name,
+            "container_opa_name": self.container_opa_name,
+            "mode": self.mode,
         }
 
 
@@ -123,7 +123,10 @@ def load_manifest(manifest_path: Path) -> dict[str, Any]:
         sys.exit(1)
 
     if not isinstance(data, dict):
-        print("[ERROR] Manifest must be a YAML mapping at the top level.", file=sys.stderr)
+        print(
+            "[ERROR] Manifest must be a YAML mapping at the top level.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     return data
@@ -186,6 +189,7 @@ def _env_to_manifest_shape(env: dict[str, str]) -> dict[str, Any]:
     Map resolved env vars into the same nested shape as manifest.yaml.
     Only known keys are mapped — unknown env vars are ignored.
     """
+
     def _int(v: str) -> int:
         try:
             return int(v)
@@ -194,19 +198,19 @@ def _env_to_manifest_shape(env: dict[str, str]) -> dict[str, Any]:
 
     return {
         "services": {
-            "image":   env.get("SERVICE_IMAGE"),
-            "port":    _int(env.get("SERVICE_PORT", "3000")),
+            "image": env.get("SERVICE_IMAGE"),
+            "port": _int(env.get("SERVICE_PORT", "3000")),
             "version": env.get("SERVICE_VERSION"),
             "restart": env.get("RESTART_POLICY"),
         },
         "nginx": {
-            "image":         env.get("NGINX_IMAGE"),
-            "port":          _int(env.get("NGINX_PORT", "8080")),
+            "image": env.get("NGINX_IMAGE"),
+            "port": _int(env.get("NGINX_PORT", "8080")),
             "proxy_timeout": _int(env.get("NGINX_PROXY_TIMEOUT", "30")),
-            "contact":       env.get("NGINX_CONTACT"),
+            "contact": env.get("NGINX_CONTACT"),
         },
         "network": {
-            "name":        env.get("NETWORK_NAME"),
+            "name": env.get("NETWORK_NAME"),
             "driver_type": env.get("NETWORK_DRIVER"),
         },
         "mode": env.get("MODE"),
@@ -248,7 +252,6 @@ def resolve(manifest_path: Path, extra_args: list[str] | None = None) -> Resolve
     ngx = merged.get("nginx", {})
     net = merged.get("network", {})
 
-
     return ResolvedConfig(
         service_image=str(svc.get("image")),
         service_port=int(svc.get("port")),
@@ -261,8 +264,15 @@ def resolve(manifest_path: Path, extra_args: list[str] | None = None) -> Resolve
         network_name=str(net.get("name")),
         network_driver=str(net.get("driver_type")),
         mode=str(merged.get("mode")),
-        container_app_name=str(env_resolved.get("CONTAINER_APP_NAME", "nockk-swiftdeploy-v1")),
-        container_nginx_name=str(env_resolved.get("CONTAINER_NGINX_NAME", "nockk-nginx-v1")),
+        container_app_name=str(
+            env_resolved.get("CONTAINER_APP_NAME", "nockk-swiftdeploy-v1")
+        ),
+        container_nginx_name=str(
+            env_resolved.get("CONTAINER_NGINX_NAME", "nockk-nginx-v1")
+        ),
+        container_opa_name=str(
+            env_resolved.get("CONTAINER_OPA_NAME", "swiftdeploy-opa")
+        ),
     )
 
 

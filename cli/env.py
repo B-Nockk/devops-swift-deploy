@@ -26,38 +26,36 @@ import os
 import sys
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
 # Required env vars with defaults
 # These match the minimum manifest requirements from the spec.
 # Changing a value here changes the fallback for all callers.
 # ---------------------------------------------------------------------------
+
+
 REQUIRED_ENV: dict[str, str] = {
     # Paths
-    "SWIFTDEPLOY_MANIFEST":  "manifest.yaml",
+    "SWIFTDEPLOY_MANIFEST": "manifest.yaml",
     "SWIFTDEPLOY_TEMPLATES": "templates",
-    "SWIFTDEPLOY_OUTPUT":    ".",
-
+    "SWIFTDEPLOY_OUTPUT": ".",
     # Service
-    "SERVICE_IMAGE":   "swift-deploy-1-node:latest",
-    "SERVICE_PORT":    "3000",
+    "SERVICE_IMAGE": "swift-deploy-1-node:latest",
+    "SERVICE_PORT": "3000",
     "SERVICE_VERSION": "0.0.1",
-    "RESTART_POLICY":  "unless-stopped",
-
+    "RESTART_POLICY": "unless-stopped",
     # Nginx
-    "NGINX_IMAGE":         "nginx:latest",
-    "NGINX_PORT":          "8080",
+    "NGINX_IMAGE": "nginx:latest",
+    "NGINX_PORT": "8080",
     "NGINX_PROXY_TIMEOUT": "30",
-    "NGINX_CONTACT":       "ops@swiftdeploy.internal",
-
+    "NGINX_CONTACT": "ops@swiftdeploy.internal",
     # Network
-    "NETWORK_NAME":   "swiftdeploy-net",
+    "NETWORK_NAME": "swiftdeploy-net",
     "NETWORK_DRIVER": "bridge",
-
     # container named
-    "CONTAINER_APP_NAME":   "nockk-swiftdeploy-v1",
+    "CONTAINER_APP_NAME": "nockk-swiftdeploy-v1",
     "CONTAINER_NGINX_NAME": "nockk-nginx-v1",
-
+    "OPA_HOST": "http://localhost:8181",
+    "CONTAINER_OPA_NAME": "nockk-opa-v1",
     # Runtime
     "MODE": "stable",
 }
@@ -66,6 +64,8 @@ REQUIRED_ENV: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # .env loader
 # ---------------------------------------------------------------------------
+
+
 def load_dotenv(env_path: Path | None = None) -> None:
     """
     Load a .env file into os.environ.
@@ -119,6 +119,8 @@ def load_dotenv(env_path: Path | None = None) -> None:
 # ---------------------------------------------------------------------------
 # Resolution functions
 # ---------------------------------------------------------------------------
+
+
 def resolve_required() -> dict[str, str]:
     """
     Resolve all REQUIRED_ENV vars.
