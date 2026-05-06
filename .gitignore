@@ -104,3 +104,7 @@ htmlcov/
 # Binary files
 
 swiftdeploy-app
+
+# audit
+history.jsonl
+audit_report.md

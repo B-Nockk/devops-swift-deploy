@@ -3,11 +3,14 @@
 swiftdeploy — The CLI that builds and manages the SwiftDeploy stack.
 
 Usage:
-  swiftdeploy init     [--<section>.<field>=<value> ...]
-  swiftdeploy validate [--<section>.<field>=<value> ...]
-  swiftdeploy deploy   [--<section>.<field>=<value> ...]
-  swiftdeploy promote  <canary|stable>
-  swiftdeploy teardown [--clean]
+  swiftdeploy init         [--<section>.<field>=<value> ...]
+  swiftdeploy validate     [--<section>.<field>=<value> ...]
+  swiftdeploy deploy       [--<section>.<field>=<value> ...]
+  swiftdeploy promote      <canary|stable>
+  swiftdeploy teardown     [--clean]
+  swiftdeploy status       [--interval=<seconds>]
+  swiftdeploy audit
+  swiftdeploy policy-check
 
 Flag overrides (apply to init, validate, deploy):
   Any manifest field can be overridden for the session without mutating manifest.yaml.
@@ -36,6 +39,10 @@ Examples:
   swiftdeploy promote stable
   swiftdeploy teardown
   swiftdeploy teardown --clean
+  swiftdeploy status
+  swiftdeploy status --interval=10
+  swiftdeploy audit
+  swiftdeploy policy-check
 """
 
 from __future__ import annotations
@@ -54,7 +61,13 @@ from cli.commands import validate, deploy, promote, teardown
 MANIFEST_PATH = PROJECT_ROOT / "manifest.yaml"
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 OUTPUT_DIR    = PROJECT_ROOT
+HISTORY_PATH  = PROJECT_ROOT / "history.jsonl"
+AUDIT_PATH    = PROJECT_ROOT / "audit_report.md"
 
+
+# ---------------------------------------------------------------------------
+# Existing subcommands — unchanged
+# ---------------------------------------------------------------------------
 
 def cmd_init(args: list[str]) -> int:
     print("→ Resolving configuration...")
@@ -93,12 +106,92 @@ def cmd_teardown(args: list[str]) -> int:
     return teardown(MANIFEST_PATH, OUTPUT_DIR, "--clean" in args)
 
 
+# ---------------------------------------------------------------------------
+# New subcommands — Phase 6/7/8
+# ---------------------------------------------------------------------------
+
+def cmd_status(args: list[str]) -> int:
+    """
+    Live terminal dashboard. Polls /api/dashboard/snapshot every N seconds.
+    Also writes each tick to history.jsonl for audit.
+
+    Usage: swiftdeploy status [--interval=<seconds>]
+    """
+    from cli.status import run_status_dashboard
+
+    interval = 5
+    for arg in args:
+        if arg.startswith("--interval="):
+            try:
+                interval = int(arg.split("=", 1)[1])
+            except ValueError:
+                print(f"[ERROR] Invalid interval value: {arg}", file=sys.stderr)
+                return 1
+
+    return run_status_dashboard(MANIFEST_PATH, interval)
+
+
+def cmd_audit(args: list[str]) -> int:
+    """
+    Generate audit_report.md from history.jsonl.
+
+    Usage: swiftdeploy audit
+    """
+    from cli.audit import run_audit
+
+    print("\n── SwiftDeploy Audit ──\n")
+    result = run_audit(HISTORY_PATH, AUDIT_PATH)
+    if result == 0:
+        print(f"\n\033[32m✓ Audit report written to {AUDIT_PATH}\033[0m\n")
+    return result
+
+
+def cmd_policy_check(args: list[str]) -> int:
+    """
+    Run pre-deploy policy checks manually without deploying.
+    Useful for verifying host health before committing to a deploy.
+
+    Usage: swiftdeploy policy-check
+    """
+    from cli.commands import _collect_host_stats
+    from cli import opa
+
+    print("\n── SwiftDeploy Policy Check ──\n")
+
+    # Infrastructure check
+    print("\033[36m  →\033[0m Collecting host stats...")
+    host_stats = _collect_host_stats()
+    print(f"    disk_free_gb:     {host_stats['disk_free_gb']}")
+    print(f"    cpu_load:         {host_stats['cpu_load']}")
+    print(f"    mem_free_percent: {host_stats['mem_free_percent']}")
+
+    print("\033[36m  →\033[0m Querying OPA infrastructure policy...")
+    result = opa.check_pre_deploy(host_stats)
+
+    if not result:
+        for violation in result.violations:
+            print(f"\033[31m[POLICY VIOLATION]\033[0m {violation}")
+        print(f"\n\033[31m✗ Policy check failed.\033[0m\n")
+        return 1
+
+    print(f"\033[32m[PASS]\033[0m Infrastructure policy checks passed")
+    print(f"\n\033[32m✓ All policy checks passed — host is ready to deploy.\033[0m\n")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Command registry — add new subcommands here, nothing else needs to change
+# ---------------------------------------------------------------------------
+
 COMMANDS = {
-    "init":     cmd_init,
-    "validate": cmd_validate,
-    "deploy":   cmd_deploy,
-    "promote":  cmd_promote,
-    "teardown": cmd_teardown,
+    "init":         cmd_init,
+    "validate":     cmd_validate,
+    "deploy":       cmd_deploy,
+    "promote":      cmd_promote,
+    "teardown":     cmd_teardown,
+    "status":       cmd_status,
+    "audit":        cmd_audit,
+    "policy-check": cmd_policy_check,
 }
 
 
@@ -107,23 +200,29 @@ def main() -> int:
     if not args or args[0] in ("-h", "--help"):
         print(__doc__)
         return 0
+
     subcommand, rest = args[0], args[1:]
     handler = COMMANDS.get(subcommand)
+
     if handler is None:
         print(f"[ERROR] Unknown subcommand: '{subcommand}'", file=sys.stderr)
         print(f"  Available: {', '.join(COMMANDS)}", file=sys.stderr)
         return 1
+
     return handler(rest)
 
 
 def _print_config_summary(config, flag_args):
     overrides = parse_flag_overrides(flag_args)
+
     def mark(section, field, value):
         sec = overrides.get(section, {})
         suffix = "  ← flag override" if isinstance(sec, dict) and field in sec else ""
         return f"  {field:20s} {value}{suffix}"
+
     def mark_top(field, value):
         return f"  {field:20s} {value}" + ("  ← flag override" if field in overrides else "")
+
     print("\n  Resolved configuration:")
     print("  services:")
     print(mark("services", "image",   config.service_image))
@@ -142,9 +241,4 @@ def _print_config_summary(config, flag_args):
 
 
 # Always execute — this file is an entry point, not a library.
-# Calling main() unconditionally ensures it runs whether invoked as
-# ./swiftdeploy, python3 swiftdeploy, or venv/bin/python3 swiftdeploy.
 main()
-
-#if __name__ == "__main__":
-   # sys.exit(main())

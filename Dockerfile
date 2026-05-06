@@ -15,7 +15,6 @@ COPY app/go.mod app/go.sum* ./
 RUN go mod download
 
 # Copy source and compile.
-# Pulls the rest of the Go source code from the app/ directory.
 COPY app/ ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath \
@@ -26,47 +25,58 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # ============================================================
 # Stage 2: Runtime
 # Alpine 3.19 — ~7MB base. Final image typically ~12-15MB total.
-# Target: well under the 300MB limit.
 # ============================================================
 FROM alpine:3.19
 
 # Runtime dependencies only:
 #   ca-certificates — TLS verification for any outbound calls
 #   tzdata          — correct UTC timestamps in logs
-#   wget            — used by HEALTHCHECK; busybox wget is in this package
+#   wget            — used by HEALTHCHECK
 RUN apk add --no-cache ca-certificates tzdata wget
 
 # Non-root user — CIS Docker Benchmark requirement.
-# UID/GID 1001 avoids collision with Alpine system users (nobody=65534, nginx=101).
+# UID/GID 1001 avoids collision with Alpine system users.
 RUN addgroup -g 1001 -S appgroup && \
     adduser  -u 1001 -S appuser -G appgroup
 
 # Create and pre-own the log directory BEFORE switching to non-root user.
-# When Docker mounts the named volume over /var/log/swiftdeploy, it preserves
-# the directory ownership set here — so appuser can write logs without root.
+# Named volume mount preserves this ownership so appuser can write logs.
 RUN mkdir -p /var/log/swiftdeploy && \
     chown -R appuser:appgroup /var/log/swiftdeploy
 
-# Copy compiled binary from builder. Root owns it; appuser can execute, not overwrite.
+# Create dashboard directory and pre-own it.
+# The docker-compose volume mount (./dashboard:/app/dashboard:ro) overlays
+# this at runtime. We create it here so the path exists even if the volume
+# isn't mounted (e.g. during local go run outside compose).
+RUN mkdir -p /app/dashboard && \
+    chown -R appuser:appgroup /app/dashboard
+
+# Copy compiled binary from builder.
 COPY --from=builder /build/swiftdeploy-app /usr/local/bin/swiftdeploy-app
 RUN chmod 755 /usr/local/bin/swiftdeploy-app
+
+# Copy dashboard static files into the image.
+# These are also available via the docker-compose volume mount (read-only),
+# which takes precedence at runtime — so you can update dashboard/ files
+# without rebuilding the image by doing `docker compose up -d --force-recreate app`.
+# The COPY here is a fallback and keeps the image self-contained.
+COPY dashboard/ /app/dashboard/
 
 # Drop privileges for all subsequent layers and at runtime.
 USER appuser
 
-# Declare volume. docker-compose mounts app_logs here.
-# Pre-ownership above ensures the mount is writable by appuser.
+# Declare volumes. docker-compose mounts these.
 VOLUME ["/var/log/swiftdeploy"]
 
 # Environment defaults — all overridden by docker-compose environment: block.
 ENV APP_PORT=3000 \
     MODE=stable \
-    APP_VERSION=0.0.1
+    APP_VERSION=0.0.1 \
+    DASHBOARD_STATIC_DIR=/app/dashboard
 
 EXPOSE ${APP_PORT}
 
-# Container-level health check (belt-and-suspenders alongside compose healthcheck).
-# Uses wget from the apk install above — available even as non-root.
+# Container-level health check.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -qO- http://localhost:${APP_PORT}/healthz || exit 1
 

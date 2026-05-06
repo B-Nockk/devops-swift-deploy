@@ -68,9 +68,11 @@ services:
             MODE: "{{ mode }}"
             APP_VERSION: "{{ app_version }}"
             APP_PORT: "{{ service_port }}"
+            DASHBOARD_STATIC_DIR: "/app/dashboard"
         networks:
             - {{ network_name }}
         volumes:
+            - ./dashboard:/app/dashboard:ro
             - app_logs:/var/log/swiftdeploy
         cap_drop:
             - ALL

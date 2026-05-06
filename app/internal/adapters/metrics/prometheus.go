@@ -35,7 +35,7 @@ type prometheusStore struct {
 	// histogram is protected by its own mutex because all fields must be
 	// updated atomically together (bucket, sum, count in one observation).
 	histMu  sync.Mutex
-	buckets [len(bucketBoundaries)]int64 // cumulative counts per bucket
+	buckets []int64 // cumulative counts per bucket, len == len(bucketBoundaries)
 	sum     float64
 	count   int64
 
@@ -53,6 +53,7 @@ func NewPrometheusStore(mode int, chaosActiveFn func() int) core.MetricsStore {
 		startTime:     time.Now(),
 		mode:          mode,
 		chaosActiveFn: chaosActiveFn,
+		buckets:       make([]int64, len(bucketBoundaries)),
 	}
 }
 

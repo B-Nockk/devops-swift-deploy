@@ -5,7 +5,8 @@
 # ============================================================
 # Configuration
 # ============================================================
-IMAGE_NAME   := swift-deploy-1-node
+# IMAGE_NAME   := swift-deploy-1-node
+IMAGE_NAME   := nockk-swift-deploy
 IMAGE_TAG    := latest
 APP_DIR      := ./app
 CLI          := ./swiftdeploy
@@ -73,6 +74,13 @@ help:
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "healthcheck"     "Hit /healthz and print response + HTTP status code"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "inspect"         "Print the fully resolved config from manifest.yaml"
 	@echo ""
+	@echo "$(CYAN)Observability & Policy$(RESET)"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "status"          "Live terminal dashboard with OPA policy compliance"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "status-watch"    "Live dashboard with custom interval (make status-watch INTERVAL=10)"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "audit"           "Generate audit_report.md from history.jsonl"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "policy-check"    "Run pre-deploy policy checks without deploying"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "dashboard"       "Print the browser dashboard URL"
+	@echo ""
 	@echo "$(CYAN)Smoke tests$(RESET)"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "smoke"           "Hit /, /healthz and check headers (stack must be running)"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "smoke-chaos"     "Test slow + error + recover chaos (must be in canary mode)"
@@ -84,6 +92,10 @@ help:
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "test-cover"      "Run Go tests with HTML coverage report"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "shell-app"       "Open a shell inside the app container"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "shell-nginx"     "Open a shell inside the nginx container"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "verify"          "Verify stack is up: docker ps + /healthz + /api/dashboard/snapshot"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "traffic"         "Send 20 requests to the stack so dashboards have data"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "traffic-loop"    "Continuous traffic generator (Ctrl+C to stop)"
+
 	@echo ""
 	@echo "$(CYAN)Utilities$(RESET)"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "ps"              "List all Docker containers (system-wide)"
@@ -169,7 +181,7 @@ deps: ## Install Python deps into whichever env is active (venv or system)
 build: ## Build the app Docker image
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile .
 	@echo "✓ Built $(IMAGE_NAME):$(IMAGE_TAG)"
- 
+
 .PHONY: build-no-cache
 build-no-cache: ## Build the app Docker image with no layer cache
 	docker build --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile .
@@ -217,6 +229,39 @@ rebuild: teardown build deploy ## Teardown -> rebuild image -> deploy
 
 .PHONY: reset
 reset: clean build deploy ## Clean -> rebuild image -> deploy (full reset from scratch)
+
+
+# ============================================================
+# Observability & Policy
+# ============================================================
+
+.PHONY: metrics-status
+status: ## Live terminal metrics dashboard with OPA policy compliance (Ctrl+C to exit)
+	$(PYTHON) $(CLI) status
+
+.PHONY: status-watch
+status-watch: ## Live terminal dashboard with custom interval: make status-watch INTERVAL=10
+	$(PYTHON) $(CLI) status --interval=$(or $(INTERVAL),5)
+
+.PHONY: audit
+audit: ## Generate audit_report.md from history.jsonl
+	$(PYTHON) $(CLI) audit
+	@echo "Report written to audit_report.md"
+
+.PHONY: policy-check
+policy-check: ## Run pre-deploy infrastructure policy checks without deploying
+	$(PYTHON) $(CLI) policy-check
+
+.PHONY: dashboard
+dashboard: ## Print the browser dashboard URL (stack must be running)
+	@PORT=$$($(PYTHON) -c "\
+	import sys; sys.path.insert(0, '.'); \
+	from cli.config import resolve; from pathlib import Path; \
+	cfg = resolve(Path('manifest.yaml'), []); print(cfg.nginx_port)"); \
+	echo ""; \
+	echo "Browser dashboard: http://localhost:$$PORT/dashboard"; \
+	echo ""; \
+	echo "Open that URL in your browser. It polls every 5 seconds automatically."
 
 # ============================================================
 # Observability
@@ -298,6 +343,35 @@ smoke-chaos: ## Test slow + error + recover chaos cycle (must be in canary mode)
 		-H "Content-Type: application/json" \
 		-d '{"mode":"recover"}' | $(PYTHON) -m json.tool
 
+
+.PHONY: verify
+verify: ## Verify stack is up — docker ps + /healthz + /api/dashboard/snapshot
+	@echo "--- Running containers ---"
+	@docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+	@echo ""
+	@echo "--- GET /healthz ---"
+	@curl -s http://localhost:8080/healthz | $(PYTHON) -m json.tool
+	@echo ""
+	@echo "--- GET /api/dashboard/snapshot ---"
+	@curl -s http://localhost:8080/api/dashboard/snapshot | $(PYTHON) -m json.tool
+
+.PHONY: traffic
+traffic: ## Send 20 requests to the stack so dashboards have data to display
+	@echo "Sending 20 requests to http://localhost:8080/ ..."
+	@for i in $$(seq 1 20); do \
+		STATUS=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/); \
+		printf "  Request $$i: HTTP $$STATUS\n"; \
+	done
+	@echo "Done — refresh the dashboard to see updated metrics."
+
+.PHONY: traffic-loop
+traffic-loop: ## Continuous traffic generator (Ctrl+C to stop) — useful for watching status dashboard
+	@echo "Sending continuous requests to http://localhost:8080/ (Ctrl+C to stop)..."
+	@while true; do \
+		curl -s -o /dev/null http://localhost:8080/; \
+		sleep 0.5; \
+	done
+
 # ============================================================
 # Development
 # ============================================================
@@ -324,6 +398,10 @@ shell-app: ## Open a shell inside the app container
 .PHONY: shell-nginx
 shell-nginx: ## Open a shell inside the nginx container
 	docker exec -it swiftdeploy-nginx sh
+
+.PHONY: go-tidy
+go-tidy: ## Tidy Go modules (run after adding new packages or adapters)
+	cd app && go mod tidy
 
 # ============================================================
 # Utilities

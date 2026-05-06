@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"swiftdeploy/internal/adapters/dashboard"
 	httpadapter "swiftdeploy/internal/adapters/http"
 	metricsadapter "swiftdeploy/internal/adapters/metrics"
 	"swiftdeploy/internal/adapters/store"
@@ -41,12 +42,17 @@ func main() {
 	version := envOrDefault("APP_VERSION", "0.0.1")
 	port := envOrDefault("APP_PORT", "3000")
 
+	// DASHBOARD_STATIC_DIR tells the dashboard handler where to find the
+	// frontend files. Defaults to ./dashboard (relative to working dir).
+	// Override in .env or docker-compose to point elsewhere if needed.
+	dashboardDir := envOrDefault("DASHBOARD_STATIC_DIR", "dashboard")
+
 	log.Printf("SwiftDeploy service starting | mode=%s version=%s port=%s", mode, version, port)
 
 	chaosStore := store.NewMemoryChaosStore()
 
-	// chaosActiveFn is a closure over chaosStore so the MetricsStore can read
-	// the current chaos state without holding a direct reference to chaosStore.
+	// chaosActiveFn lets the metrics adapter read chaos state without
+	// holding a direct reference to chaosStore.
 	// Mapping: ChaosModeNone=0, ChaosModeSlow=1, ChaosModeError=2
 	chaosActiveFn := func() int {
 		state, err := chaosStore.Get()
@@ -64,12 +70,19 @@ func main() {
 	}
 
 	metricsStore := metricsadapter.NewPrometheusStore(modeInt(mode), chaosActiveFn)
-
 	svc := core.NewService(mode, version, chaosStore, metricsStore)
-	handler := httpadapter.NewHandler(svc)
 
 	mux := http.NewServeMux()
-	handler.Register(mux)
+
+	// ── Adapters ─────────────────────────────────────────────────────────────
+	// Each adapter registers its own routes. Order matters only if routes
+	// overlap — they don't here.
+	//
+	// To add a new adapter: create it, call .Register(mux), done.
+	// Nothing else in this file needs to change.
+
+	httpadapter.NewHandler(svc).Register(mux)
+	dashboard.NewHandler(svc, dashboardDir).Register(mux)
 
 	addr := fmt.Sprintf(":%s", port)
 	log.Printf("Listening on %s", addr)

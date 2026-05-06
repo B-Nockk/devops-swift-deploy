@@ -13,3 +13,4 @@ Jinja2>=3.1
 # on manifest.yaml writes during `swiftdeploy promote`
 # PyYAML cannot do this safely — ruamel.yaml is required
 ruamel.yaml>=0.18
+rich>=13.7.0

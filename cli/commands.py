@@ -31,8 +31,6 @@ from typing import Callable
 import yaml
 from ruamel.yaml import YAML
 
-from . import metrics as metrics_client
-from . import opa
 from .config import (
     ResolvedConfig,
     check_required_fields,
@@ -40,36 +38,25 @@ from .config import (
     resolve,
 )
 from .generator import generate_all, generate_compose_only
+from . import opa
+from . import metrics as metrics_client
+
 
 # ---------------------------------------------------------------------------
 # ANSI colours — degrade gracefully if terminal doesn't support them
 # ---------------------------------------------------------------------------
-_GREEN = "\033[32m"
-_RED = "\033[31m"
+_GREEN  = "\033[32m"
+_RED    = "\033[31m"
 _YELLOW = "\033[33m"
-_CYAN = "\033[36m"
-_RESET = "\033[0m"
-_BOLD = "\033[1m"
+_CYAN   = "\033[36m"
+_RESET  = "\033[0m"
+_BOLD   = "\033[1m"
 
-
-def _ok(msg: str) -> str:
-    return f"{_GREEN}[PASS]{_RESET} {msg}"
-
-
-def _fail(msg: str) -> str:
-    return f"{_RED}[FAIL]{_RESET} {msg}"
-
-
-def _info(msg: str) -> str:
-    return f"{_CYAN}  →{_RESET} {msg}"
-
-
-def _warn(msg: str) -> str:
-    return f"{_YELLOW}[WARN]{_RESET} {msg}"
-
-
-def _bold(msg: str) -> str:
-    return f"{_BOLD}{msg}{_RESET}"
+def _ok(msg: str)   -> str: return f"{_GREEN}[PASS]{_RESET} {msg}"
+def _fail(msg: str) -> str: return f"{_RED}[FAIL]{_RESET} {msg}"
+def _info(msg: str) -> str: return f"{_CYAN}  →{_RESET} {msg}"
+def _warn(msg: str) -> str: return f"{_YELLOW}[WARN]{_RESET} {msg}"
+def _bold(msg: str) -> str: return f"{_BOLD}{msg}{_RESET}"
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +87,8 @@ def validate(
     # ── Check 1: manifest.yaml exists and is valid YAML ──────────────────────
     manifest_raw = None
     if not manifest_path.exists():
-        record(
-            False,
-            "manifest.yaml exists and is valid YAML",
-            f"Not found at: {manifest_path}",
-        )
+        record(False, "manifest.yaml exists and is valid YAML",
+               f"Not found at: {manifest_path}")
     else:
         try:
             with manifest_path.open() as f:
@@ -122,11 +106,8 @@ def validate(
         else:
             record(True, "All required fields present and non-empty")
     else:
-        record(
-            False,
-            "All required fields present and non-empty",
-            "Skipped — manifest could not be loaded",
-        )
+        record(False, "All required fields present and non-empty",
+               "Skipped — manifest could not be loaded")
 
     # ── Check 3: Docker image exists locally ─────────────────────────────────
     image = None
@@ -141,11 +122,8 @@ def validate(
         ok, detail = _docker_image_exists(image)
         record(ok, f"Docker image '{image}' exists locally", detail)
     else:
-        record(
-            False,
-            "Docker image exists locally",
-            "Could not resolve image name from manifest",
-        )
+        record(False, "Docker image exists locally",
+               "Could not resolve image name from manifest")
 
     # ── Check 4: nginx port not already bound on the host ────────────────────
     nginx_port = None
@@ -164,53 +142,37 @@ def validate(
             (
                 f"Something is already listening on port {nginx_port}. "
                 f"Run: lsof -i :{nginx_port}"
-            )
-            if not port_free
-            else "",
+            ) if not port_free else "",
         )
     else:
-        record(
-            False,
-            "Nginx port is not already bound on the host",
-            "Could not resolve nginx port from manifest",
-        )
+        record(False, "Nginx port is not already bound on the host",
+               "Could not resolve nginx port from manifest")
 
     # ── Check 5: generated nginx.conf is syntactically valid ─────────────────
     nginx_conf = output_dir / "nginx.conf"
     if not nginx_conf.exists():
-        record(
-            False,
-            "nginx.conf is syntactically valid",
-            "nginx.conf not found — run: swiftdeploy init",
-        )
+        record(False, "nginx.conf is syntactically valid",
+               "nginx.conf not found — run: swiftdeploy init")
     else:
         try:
             valid, detail = _validate_nginx_conf(nginx_conf)
             record(valid, "nginx.conf is syntactically valid", detail)
         except FileNotFoundError:
-            record(
-                False,
-                "nginx.conf is syntactically valid",
-                "Docker not available — cannot run nginx -t validation",
-            )
+            record(False, "nginx.conf is syntactically valid",
+                   "Docker not available — cannot run nginx -t validation")
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print()
     if not failures:
-        print(
-            f"{_GREEN}{_BOLD}✓ All checks passed — stack is ready to deploy.{_RESET}\n"
-        )
+        print(f"{_GREEN}{_BOLD}✓ All checks passed — stack is ready to deploy.{_RESET}\n")
         return 0
     else:
         count = len(failures)
-        print(
-            f"{_RED}{_BOLD}✗ {count} check(s) failed — resolve the above before deploying.{_RESET}\n"
-        )
+        print(f"{_RED}{_BOLD}✗ {count} check(s) failed — resolve the above before deploying.{_RESET}\n")
         return 1
 
 
 def _docker_image_exists(image: str) -> tuple[bool, str]:
-    """Check if a Docker image exists locally. Handles Docker not being installed."""
     try:
         result = subprocess.run(
             ["docker", "image", "inspect", image],
@@ -234,7 +196,7 @@ def _is_port_free(port: int) -> bool:
             s.connect(("127.0.0.1", port))
             return False  # connection succeeded → port is occupied
         except (ConnectionRefusedError, OSError):
-            return True  # connection refused → port is free
+            return True   # connection refused → port is free
 
 
 def _validate_nginx_conf(nginx_conf: Path) -> tuple[bool, str]:
@@ -244,16 +206,10 @@ def _validate_nginx_conf(nginx_conf: Path) -> tuple[bool, str]:
     """
     result = subprocess.run(
         [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{nginx_conf.resolve()}:/etc/nginx/nginx.conf:ro",
+            "docker", "run", "--rm",
+            "-v", f"{nginx_conf.resolve()}:/etc/nginx/nginx.conf:ro",
             "nginx:latest",
-            "nginx",
-            "-t",
-            "-c",
-            "/etc/nginx/nginx.conf",
+            "nginx", "-t", "-c", "/etc/nginx/nginx.conf",
         ],
         capture_output=True,
         text=True,
@@ -268,7 +224,6 @@ def _validate_nginx_conf(nginx_conf: Path) -> tuple[bool, str]:
 # Host stats — collected for OPA pre-deploy check
 # ---------------------------------------------------------------------------
 
-
 def _collect_host_stats() -> dict:
     """
     Collect host resource stats for the OPA infrastructure policy check.
@@ -277,7 +232,7 @@ def _collect_host_stats() -> dict:
     containerised deployment tool running on Linux).
     """
     disk = shutil.disk_usage("/")
-    disk_free_gb = round(disk.free / (1024**3), 2)
+    disk_free_gb = round(disk.free / (1024 ** 3), 2)
 
     try:
         with open("/proc/loadavg") as f:
@@ -351,12 +306,35 @@ def deploy(
     policy_result = opa.check_pre_deploy(host_stats)
 
     if not policy_result:
-        for violation in policy_result.violations:
-            print(f"{_RED}[POLICY VIOLATION]{_RESET} {violation}")
-        print(f"\n{_RED}✗ Deployment blocked by policy.{_RESET}")
-        return 1
-
-    print(_ok("Pre-deploy policy checks passed"))
+        # Check if this is an OPA availability failure vs a real policy violation
+        is_opa_down = any(
+            "not available" in v or "timed out" in v or "not found" in v
+            for v in policy_result.violations
+        )
+        if is_opa_down:
+            # Check if OPA container exists at all
+            opa_exists = subprocess.run(
+                ["docker", "ps", "-q", "--filter", f"name={cfg.container_opa_name}"],
+                capture_output=True, text=True
+            )
+            if not opa_exists.stdout.strip():
+                # First deploy — OPA container doesn't exist yet, warn and continue
+                print(_warn("OPA not reachable — first deploy detected, skipping policy gate."))
+                print(_warn("Policy enforcement will be active on all subsequent deploys."))
+            else:
+                # OPA container exists but isn't responding — real problem
+                print(f"{_RED}[POLICY VIOLATION]{_RESET} {policy_result.violations[0]}")
+                print(f"\n{_RED}✗ Deployment blocked — OPA exists but is not responding.{_RESET}")
+                print(f"  Check: docker logs {cfg.container_opa_name}")
+                return 1
+        else:
+            # OPA is up and genuinely denied the request
+            for violation in policy_result.violations:
+                print(f"{_RED}[POLICY VIOLATION]{_RESET} {violation}")
+            print(f"\n{_RED}✗ Deployment blocked by policy.{_RESET}")
+            return 1
+    else:
+        print(_ok("Pre-deploy policy checks passed"))
 
     # Step 3: bring stack up
     print(_info("Starting stack with docker compose..."))
@@ -394,10 +372,7 @@ def _wait_for_health(url: str, timeout: int, interval: int) -> bool:
         try:
             with urllib.request.urlopen(url, timeout=3) as resp:
                 if resp.status == 200:
-                    print(
-                        f"\r  {_GREEN}✓{_RESET} Healthy after ~{attempt * interval}s",
-                        end="",
-                    )
+                    print(f"\r  {_GREEN}✓{_RESET} Healthy after ~{attempt * interval}s", end="")
                     sys.stdout.flush()
                     return True
         except Exception:
@@ -457,26 +432,13 @@ def promote(
     print("  docker-compose.yml updated")
 
     # ── Step 3: Restart app container with new MODE env var ──────────────────
-    #
-    # We need compose up --force-recreate to apply the new MODE env var from
-    # the regenerated docker-compose.yml. Plain `docker restart` would keep
-    # the old env var.
-    #
-    # To avoid the network disconnection issue, we:
-    #   1. Use --force-recreate --no-deps (only app, nginx untouched)
-    #   2. Wait for Docker's own healthcheck to pass before polling nginx
-    #      (Docker healthcheck start_period=10s, so we wait 15s minimum)
     print(_info("Restarting app service with new MODE env var (nginx untouched)..."))
-    result = _compose(
-        output_dir,
-        [
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            "app",
-        ],
-    )
+    result = _compose(output_dir, [
+        "up", "-d",
+        "--no-deps",
+        "--force-recreate",
+        "app",
+    ])
     if result.returncode != 0:
         print(f"{_RED}✗ Service restart failed:{_RESET}")
         print(result.stderr or result.stdout)
@@ -492,14 +454,10 @@ def promote(
     health_url = f"http://localhost:{new_cfg.nginx_port}/healthz"
     healthy = _wait_for_health(health_url, timeout=60, interval=3)
     if not healthy:
-        print(
-            f"\n{_RED}✗ Service did not become healthy within 60s after restart.{_RESET}"
-        )
+        print(f"\n{_RED}✗ Service did not become healthy within 60s after restart.{_RESET}")
         print("  Diagnose with:")
         print(f"    docker logs {new_cfg.container_app_name}")
-        print(
-            f"    docker inspect --format='{{{{.State.Health.Status}}}}' {new_cfg.container_app_name}"
-        )
+        print(f"    docker inspect --format='{{{{.State.Health.Status}}}}' {new_cfg.container_app_name}")
         return 1
 
     # ── Step 5: OPA pre-promote policy check ─────────────────────────────────
@@ -513,9 +471,7 @@ def promote(
     scrape = metrics_client.scrape(new_cfg.nginx_port)
 
     if scrape is None:
-        print(
-            f"{_RED}[POLICY VIOLATION]{_RESET} Could not scrape /metrics — is the stack running?"
-        )
+        print(f"{_RED}[POLICY VIOLATION]{_RESET} Could not scrape /metrics — is the stack running?")
         print(f"\n{_RED}✗ Promotion blocked: metrics unavailable.{_RESET}")
         return 1
 
@@ -557,14 +513,7 @@ def promote(
 def _update_manifest_mode(manifest_path: Path, mode: str) -> None:
     """
     Update the `mode` field in manifest.yaml in-place.
-
-    Uses ruamel.yaml which preserves:
-      - Comments
-      - Key order
-      - Quoting style
-      - Indentation
-
-    PyYAML would strip all of the above — never use it for writes.
+    Uses ruamel.yaml to preserve comments, key order, and quoting style.
     """
     ryaml = YAML()
     ryaml.preserve_quotes = True
@@ -593,9 +542,7 @@ def _confirm_mode(health_url: str, expected_mode: str, nginx_port: int) -> bool:
 
             body_mode = body.get("mode", "")
             if body_mode != expected_mode:
-                print(
-                    f"\n  Body mode mismatch: got '{body_mode}', expected '{expected_mode}'"
-                )
+                print(f"\n  Body mode mismatch: got '{body_mode}', expected '{expected_mode}'")
                 return False
 
             if expected_mode == "canary" and x_mode != "canary":
@@ -603,7 +550,7 @@ def _confirm_mode(health_url: str, expected_mode: str, nginx_port: int) -> bool:
                 return False
 
             if expected_mode == "stable" and x_mode == "canary":
-                print(f"\n  X-Mode header still present in {expected_mode} mode")
+                print(f"\n  X-Mode header still present in stable mode")
                 return False
 
             return True
@@ -668,7 +615,6 @@ def _compose(cwd: Path, compose_args: list[str]) -> subprocess.CompletedProcess:
     Run `docker compose <args>` in the given working directory.
     Falls back to `docker-compose` (v1) if the v2 plugin is not found.
     """
-
     def _run(cmd: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(
             cmd,

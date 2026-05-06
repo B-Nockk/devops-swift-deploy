@@ -33,10 +33,10 @@ http {
     # Upstream — app service on the internal Docker network.
     # This port is NEVER bound to the host; only nginx reaches it.
     # -------------------------------------------------------------------------
-    upstream swiftdeploy_app {
-        server {{ service_host }}:{{ service_port }};
-        keepalive 16;
-    }
+    # upstream swiftdeploy_app {
+    #     server {{ service_host }}:{{ service_port }};
+    #     keepalive 16;
+    # }
 
     server {
         listen {{ nginx_port }};
@@ -63,7 +63,7 @@ http {
         add_header X-Deployed-By "swiftdeploy" always;
 
         # -----------------------------------------------------------------------
-        # X-Mode passthrough
+        # # X-Mode passthrough — canary service sets this; nginx forwards it
         #
         # nginx strips upstream response headers that aren't in a safe-list by
         # default via proxy_hide_header behaviour. Two directives are needed:
@@ -86,14 +86,45 @@ http {
         error_page 504 = @error_504;
 
         # -----------------------------------------------------------------------
-        # Main proxy location
+        # Dashboard frontend
+        #
+        # Serves static files (index.html, index.css, metrics.js) from the
+        # Go service's embedded file server.
+        #
+        # To swap the frontend: replace dashboard/ files at the project root.
+        # To restrict access: add allow/deny rules or auth_request here.
+        # -----------------------------------------------------------------------
+        location /dashboard {
+            set $upstream http://{{ service_host }}:{{ service_port }};
+            proxy_pass $upstream;
+        }
+
+        # -----------------------------------------------------------------------
+        # Dashboard BFF API
+        #
+        # The browser JS calls this to get pre-computed dashboard data.
+        # /metrics is NOT proxied — only this endpoint is exposed to the browser.
+        #
+        # To add new dashboard endpoints: add them under /api/dashboard/ in
+        # the Go dashboard adapter, then proxy them here.
+        # -----------------------------------------------------------------------
+        location /api/dashboard/ {
+            set $upstream http://{{ service_host }}:{{ service_port }};
+            proxy_pass $upstream;
+        }
+
+        # -----------------------------------------------------------------------
+        # Main proxy — all other traffic goes to the app service
         # -----------------------------------------------------------------------
         location / {
-            proxy_pass http://swiftdeploy_app;
+            set $upstream http://{{ service_host }}:{{ service_port }};
+            proxy_pass $upstream;
         }
 
         # -----------------------------------------------------------------------
         # JSON error response bodies for 502 / 503 / 504
+        # add_header repeated per location — not inherited by named locations
+        # ASCII only in strings — multi-byte chars can truncate the body
         #
         # Rules:
         #   - default_type must be set per location (not inherited by named locations)

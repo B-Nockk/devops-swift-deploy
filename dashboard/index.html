@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>SwiftDeploy Dashboard</title>
+        <link rel="stylesheet" href="/dashboard/index.css" />
+    </head>
+
+    <body>
+        <header>
+            <div class="header-left">
+                <span class="logo">⚡ SwiftDeploy</span>
+                <span id="mode-badge" class="badge">—</span>
+                <span id="chaos-badge" class="badge badge-chaos hidden">—</span>
+            </div>
+            <div class="header-right">
+                <span class="meta">v<span id="version">—</span></span>
+                <span class="meta">up <span id="uptime">—</span></span>
+                <span id="status-dot" class="dot dot-loading" title="Connecting..."></span>
+            </div>
+        </header>
+
+        <main>
+            <!-- ── Key metrics ─────────────────────────────────────────── -->
+            <section class="cards">
+                <div class="card">
+                    <div class="card-label">Total Requests</div>
+                    <div class="card-value" id="total-requests">—</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">Error Rate</div>
+                    <div class="card-value" id="error-rate">—</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">P99 Latency</div>
+                    <div class="card-value" id="p99-latency">—</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">Error Requests</div>
+                    <div class="card-value" id="error-requests">—</div>
+                </div>
+            </section>
+
+            <!-- ── Per-route table ─────────────────────────────────────── -->
+            <section class="table-section">
+                <h2>Request Breakdown</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Path</th>
+                            <th>Status</th>
+                            <th>Count</th>
+                        </tr>
+                    </thead>
+                    <tbody id="routes-tbody">
+                        <tr>
+                            <td colspan="4" class="empty">Waiting for data...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <footer id="last-updated">Last updated: —</footer>
+        </main>
+
+        <!--
+    metrics.js handles all data fetching and DOM updates.
+    To change the poll interval or snapshot URL: edit CONFIG at the top of metrics.js.
+    To add new UI elements: add them above and reference them in metrics.js.
+  -->
+        <script src="/dashboard/metrics.js"></script>
+    </body>
+
+</html>
