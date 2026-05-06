@@ -295,13 +295,13 @@ healthcheck: ## Hit /healthz and print response + HTTP status code
 .PHONY: inspect
 inspect: ## Print the fully resolved config from manifest.yaml (no Docker needed)
 	@$(PYTHON) -c "\
-import sys; sys.path.insert(0, '.'); \
-from cli.config import resolve; \
-from pathlib import Path; \
-c = resolve(Path('manifest.yaml'), []); \
-print('\nResolved configuration:'); \
-[print(f'  {k:<20} {v}') for k, v in vars(c).items()]; \
-print()"
+	import sys; sys.path.insert(0, '.'); \
+	from cli.config import resolve; \
+	from pathlib import Path; \
+	c = resolve(Path('manifest.yaml'), []); \
+	print('\nResolved configuration:'); \
+	[print(f'  {k:<20} {v}') for k, v in vars(c).items()]; \
+	print()"
 
 # ============================================================
 # Smoke tests
