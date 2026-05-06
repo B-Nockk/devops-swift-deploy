@@ -236,7 +236,7 @@ reset: clean build deploy ## Clean -> rebuild image -> deploy (full reset from s
 # ============================================================
 
 .PHONY: metrics-status
-status: ## Live terminal metrics dashboard with OPA policy compliance (Ctrl+C to exit)
+metrics-status: ## Live terminal metrics dashboard with OPA policy compliance (Ctrl+C to exit)
 	$(PYTHON) $(CLI) status
 
 .PHONY: status-watch
