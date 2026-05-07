@@ -1,20 +1,20 @@
 # The only field mutated at runtime is `mode`, updated by: swiftdeploy promote
 
 services:
-    image: nockk-swift-deploy:latest
-    port: 3000
-    version: "1.0.0" # injected as APP_VERSION into the container
-    restart: unless-stopped
+  image: nockk-swift-deploy:latest
+  port: 3000
+  version: "1.0.0"   # injected as APP_VERSION into the container
+  restart: unless-stopped
 
 nginx:
-    image: nginx:latest
-    port: 8080
-    proxy_timeout: 30 # seconds — applied to proxy_read/send/connect timeouts
-    contact: "ob.ogheneochuko@gmail.com" # used in JSON error body { "contact": "..." }
+  image: nginx:latest
+  port: 8080
+  proxy_timeout: 30   # seconds — applied to proxy_read/send/connect timeouts
+  contact: "ob.ogheneochuko@gmail.com"   # used in JSON error body { "contact": "..." }
 
 network:
-    name: swiftdeploy-net
-    driver_type: bridge
+  name: swiftdeploy-net
+  driver_type: bridge
 
-mode: stable # current deployment mode: stable | canary
+mode: canary # current deployment mode: stable | canary
     # updated in-place by: swiftdeploy promote [canary|stable]
