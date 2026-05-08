@@ -16,5 +16,5 @@ network:
   name: swiftdeploy-net
   driver_type: bridge
 
-mode: canary # current deployment mode: stable | canary
+mode: stable # current deployment mode: stable | canary
     # updated in-place by: swiftdeploy promote [canary|stable]

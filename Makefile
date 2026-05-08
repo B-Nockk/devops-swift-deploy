@@ -6,10 +6,13 @@
 # Configuration
 # ============================================================
 # IMAGE_NAME   := swift-deploy-1-node
-IMAGE_NAME   := nockk-swift-deploy
-IMAGE_TAG    := latest
-APP_DIR      := ./app
-CLI          := ./swiftdeploy
+NGINX_CONTAINER_IMAGE  	:= nockk-nginx-v1
+NGINX_LOG_FILE			:= hng-access.log
+HOST_URI				:= http://localhost:8080
+IMAGE_NAME   			:= nockk-swift-deploy
+IMAGE_TAG    			:= latest
+APP_DIR      			:= ./app
+CLI          			:= ./swiftdeploy
 
 # ── Python / venv detection ───────────────────────────────────────────────────
 # If a venv exists at ./venv, use its Python and pip binaries directly by path.
@@ -75,7 +78,7 @@ help:
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "inspect"         "Print the fully resolved config from manifest.yaml"
 	@echo ""
 	@echo "$(CYAN)Observability & Policy$(RESET)"
-	@printf "  $(GREEN)%-22s$(RESET) %s\n" "status"          "Live terminal dashboard with OPA policy compliance"
+	@printf "  $(GREEN)%-22s$(RESET) %s\n" "metrics-status"  "Live terminal dashboard with OPA policy compliance"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "status-watch"    "Live dashboard with custom interval (make status-watch INTERVAL=10)"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "audit"           "Generate audit_report.md from history.jsonl"
 	@printf "  $(GREEN)%-22s$(RESET) %s\n" "policy-check"    "Run pre-deploy policy checks without deploying"
@@ -284,11 +287,11 @@ logs-nginx: ## Tail logs from the nginx container only
 
 .PHONY: logs-access
 logs-access: ## Tail the nginx access log (custom swiftdeploy format)
-	docker exec swiftdeploy-nginx tail -f /var/log/nginx/access.log
+	docker exec $(NGINX_CONTAINER_IMAGE) tail -f /var/log/nginx/$(NGINX_LOG_FILE)
 
 .PHONY: healthcheck
 healthcheck: ## Hit /healthz and print response + HTTP status code
-	@STATUS=$$(curl -s -o /tmp/sd_health.json -w "%{http_code}" http://localhost:8080/healthz); \
+	@STATUS=$$(curl -s -o /tmp/sd_health.json -w "%{http_code}" $(HOST_URI)/healthz); \
 	echo "HTTP $$STATUS"; \
 	cat /tmp/sd_health.json | $(PYTHON) -m json.tool
 
@@ -309,37 +312,37 @@ inspect: ## Print the fully resolved config from manifest.yaml (no Docker needed
 .PHONY: smoke
 smoke: ## Hit /, /healthz and check headers (stack must be running)
 	@echo "--- GET / ---"
-	@curl -s http://localhost:8080/ | $(PYTHON) -m json.tool
+	@curl -s $(HOST_URI)/ | $(PYTHON) -m json.tool
 	@echo ""
 	@echo "--- GET /healthz ---"
-	@curl -s http://localhost:8080/healthz | $(PYTHON) -m json.tool
+	@curl -s $(HOST_URI)/healthz | $(PYTHON) -m json.tool
 	@echo ""
 	@echo "--- Response headers ---"
-	@curl -sI http://localhost:8080/ | grep -E "X-Deployed-By|X-Mode|Content-Type|HTTP/"
+	@curl -sI $(HOST_URI)/ | grep -E "X-Deployed-By|X-Mode|Content-Type|HTTP/"
 
 .PHONY: smoke-chaos
 smoke-chaos: ## Test slow + error + recover chaos cycle (must be in canary mode)
 	@echo "--- Arming slow chaos (2s delay) ---"
-	@curl -s -X POST http://localhost:8080/chaos \
+	@curl -s -X POST $(HOST_URI)/chaos \
 		-H "Content-Type: application/json" \
 		-d '{"mode":"slow","duration":2}' | $(PYTHON) -m json.tool
 	@echo ""
 	@echo "--- GET / (expect ~2s delay) ---"
-	@curl -s -w "\nElapsed: %{time_total}s\n" http://localhost:8080/
+	@curl -s -w "\nElapsed: %{time_total}s\n" $(HOST_URI)/
 	@echo ""
 	@echo "--- Arming error chaos (50% rate) ---"
-	@curl -s -X POST http://localhost:8080/chaos \
+	@curl -s -X POST $(HOST_URI)/chaos \
 		-H "Content-Type: application/json" \
 		-d '{"mode":"error","rate":0.5}' | $(PYTHON) -m json.tool
 	@echo ""
 	@echo "--- 5 requests (expect ~50%% to return 500) ---"
 	@for i in 1 2 3 4 5; do \
-		STATUS=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/); \
+		STATUS=$$(curl -s -o /dev/null -w "%{http_code}" $(HOST_URI)/); \
 		echo "  Request $$i: HTTP $$STATUS"; \
 	done
 	@echo ""
 	@echo "--- Recovering ---"
-	@curl -s -X POST http://localhost:8080/chaos \
+	@curl -s -X POST $(HOST_URI)/chaos \
 		-H "Content-Type: application/json" \
 		-d '{"mode":"recover"}' | $(PYTHON) -m json.tool
 
@@ -350,25 +353,25 @@ verify: ## Verify stack is up — docker ps + /healthz + /api/dashboard/snapshot
 	@docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 	@echo ""
 	@echo "--- GET /healthz ---"
-	@curl -s http://localhost:8080/healthz | $(PYTHON) -m json.tool
+	@curl -s $(HOST_URI)/healthz | $(PYTHON) -m json.tool
 	@echo ""
 	@echo "--- GET /api/dashboard/snapshot ---"
-	@curl -s http://localhost:8080/api/dashboard/snapshot | $(PYTHON) -m json.tool
+	@curl -s $(HOST_URI)/api/dashboard/snapshot | $(PYTHON) -m json.tool
 
 .PHONY: traffic
 traffic: ## Send 20 requests to the stack so dashboards have data to display
-	@echo "Sending 20 requests to http://localhost:8080/ ..."
+	@echo "Sending 20 requests to $(HOST_URI)/ ..."
 	@for i in $$(seq 1 20); do \
-		STATUS=$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/); \
+		STATUS=$$(curl -s -o /dev/null -w "%{http_code}" $(HOST_URI)/); \
 		printf "  Request $$i: HTTP $$STATUS\n"; \
 	done
 	@echo "Done — refresh the dashboard to see updated metrics."
 
 .PHONY: traffic-loop
 traffic-loop: ## Continuous traffic generator (Ctrl+C to stop) — useful for watching status dashboard
-	@echo "Sending continuous requests to http://localhost:8080/ (Ctrl+C to stop)..."
+	@echo "Sending continuous requests to $(HOST_URI)/ (Ctrl+C to stop)..."
 	@while true; do \
-		curl -s -o /dev/null http://localhost:8080/; \
+		curl -s -o /dev/null $(HOST_URI)/; \
 		sleep 0.5; \
 	done
 
